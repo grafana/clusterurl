@@ -1,6 +1,6 @@
 module github.com/grafana/clusterurl
 
-go 1.21.0
+go 1.20
 
 require (
 	github.com/AlessandroPomponio/go-gibberish v0.0.0-20191004143433-a2d4156f0396 // indirect
