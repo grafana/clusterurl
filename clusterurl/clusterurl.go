@@ -14,6 +14,13 @@ var classifier *structs.GibberishData
 
 const maxSegments = 10
 
+var isSeparator = map[byte]bool{
+	'/': true,
+	'&': true,
+	'?': true,
+	'=': true,
+}
+
 var words, _ = lru.New[string, bool](8192)
 
 //go:embed classifier.json
@@ -64,7 +71,8 @@ func ClusterURL(path string) string {
 	skipGrace := true
 	nSegments := 0
 	for _, c := range p {
-		if c == '/' {
+		char := c
+		if isSeparator[c] {
 			nSegments++
 			if skip {
 				p[sPos] = '*'
@@ -82,7 +90,7 @@ func ClusterURL(path string) string {
 				break
 			}
 
-			p[sPos] = '/'
+			p[sPos] = char
 			sPos++
 			sFwd = sPos
 			skip = false
@@ -129,5 +137,5 @@ func okWord(w string) bool {
 }
 
 func isAlpha(c byte) bool {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-' || c == '_'
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-' || c == '_' || c == ' ' || c == '.'
 }
