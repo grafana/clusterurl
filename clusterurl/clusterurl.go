@@ -10,45 +10,43 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 )
 
-var classifier *structs.GibberishData
-
-const maxSegments = 10
-
-var isSeparator = map[byte]bool{
-	'/': true,
-	'&': true,
-	'?': true,
-	'=': true,
+type ClusterUrlClassifier struct {
+	classifier  *structs.GibberishData
+	isSeparator map[byte]bool
+	cache       *lru.Cache[string, bool]
+	cfg         *Config
 }
 
-var words, _ = lru.New[string, bool](8192)
-
-//go:embed classifier.json
-var dataFile embed.FS
-
-func loadKnowledgeBase() (*structs.GibberishData, error) {
-	content, err := dataFile.ReadFile("classifier.json")
-	if err != nil {
-		return nil, fmt.Errorf("LoadKnowledgeBase: unable to read knowledge base content: %w", err)
+func NewClusterUrlClassifier(config *Config) (*ClusterUrlClassifier, error) {
+	if config == nil {
+		config = DefaultConfig()
 	}
 
-	var data structs.GibberishData
-	err = json.Unmarshal(content, &data)
-	if err != nil {
-		return nil, fmt.Errorf("LoadKnowledgeBase: unable to unmarshal knowledge base content: %w", err)
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("NewClusterUrlClassifier: invalid configuration: %w", err)
 	}
 
-	return &data, nil
-}
-
-func InitAutoClassifier() error {
-	var err error
-	classifier, err = loadKnowledgeBase()
+	classifier, err := loadKnowledgeBase()
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("NewClusterUrlClassifier: unable to load knowledge base: %w", err)
 	}
 
-	return nil
+	isSeparator := make(map[byte]bool)
+	for _, sep := range config.Separators {
+		isSeparator[sep] = true
+	}
+
+	cache, err := lru.New[string, bool](config.CacheSize)
+	if err != nil {
+		return nil, fmt.Errorf("NewClusterUrlClassifier: unable to create cache: %w", err)
+	}
+
+	return &ClusterUrlClassifier{
+		classifier:  classifier,
+		isSeparator: isSeparator,
+		cache:       cache,
+		cfg:         config,
+	}, nil
 }
 
 // This function takes a path and returns a "clustered" path, where
@@ -58,7 +56,7 @@ func InitAutoClassifier() error {
 // to be grouped into a smaller number of paths.
 
 //nolint:cyclop
-func ClusterURL(path string) string {
+func (csf *ClusterUrlClassifier) ClusterURL(path string) string {
 	if path == "" {
 		return path
 	}
@@ -72,21 +70,21 @@ func ClusterURL(path string) string {
 	nSegments := 0
 	for _, c := range p {
 		char := c
-		if isSeparator[c] {
+		if csf.isSeparator[c] {
 			nSegments++
 			if skip {
-				p[sPos] = '*'
+				p[sPos] = csf.cfg.ReplaceWith
 				sPos++
 			} else if sFwd > sPos {
-				if !okWord(string(p[sPos:sFwd])) {
-					p[sPos] = '*'
+				if !csf.okWord(string(p[sPos:sFwd])) {
+					p[sPos] = csf.cfg.ReplaceWith
 					sPos++
 				} else {
 					sPos = sFwd
 				}
 			}
 
-			if nSegments >= maxSegments {
+			if nSegments >= csf.cfg.MaxSegments {
 				break
 			}
 
@@ -109,11 +107,11 @@ func ClusterURL(path string) string {
 	}
 
 	if skip {
-		p[sPos] = '*'
+		p[sPos] = csf.cfg.ReplaceWith
 		sPos++
 	} else if sFwd > sPos {
-		if !okWord(string(p[sPos:sFwd])) {
-			p[sPos] = '*'
+		if !csf.okWord(string(p[sPos:sFwd])) {
+			p[sPos] = csf.cfg.ReplaceWith
 			sPos++
 		} else {
 			sPos = sFwd
@@ -123,17 +121,35 @@ func ClusterURL(path string) string {
 	return string(p[:sPos])
 }
 
-func okWord(w string) bool {
-	_, ok := words.Get(w)
+func (csf *ClusterUrlClassifier) okWord(w string) bool {
+	_, ok := csf.cache.Get(w)
 	if ok {
 		return ok
 	}
-	if gibberish.IsGibberish(w, classifier) {
+	if gibberish.IsGibberish(w, csf.classifier) {
 		return false
 	}
 
-	words.Add(w, true)
+	csf.cache.Add(w, true)
 	return true
+}
+
+//go:embed model.json
+var dataFile embed.FS
+
+func loadKnowledgeBase() (*structs.GibberishData, error) {
+	content, err := dataFile.ReadFile("model.json")
+	if err != nil {
+		return nil, fmt.Errorf("LoadKnowledgeBase: unable to read knowledge base content: %w", err)
+	}
+
+	var data structs.GibberishData
+	err = json.Unmarshal(content, &data)
+	if err != nil {
+		return nil, fmt.Errorf("LoadKnowledgeBase: unable to unmarshal knowledge base content: %w", err)
+	}
+
+	return &data, nil
 }
 
 func isAlpha(c byte) bool {
