@@ -44,4 +44,6 @@ func TestClusterURL(t *testing.T) {
 	assert.Equal(t, "CONNECT /user_space/", csf.ClusterURL("CONNECT /user_space/"))
 	assert.Equal(t, "/attach", csf.ClusterURL("/attach&session_id=ddfsdsf&track_id=sjdklnfldsn"))
 	assert.Equal(t, "/attach", csf.ClusterURL("/attach#section-1"))
+	assert.Equal(t, "HTTP GET", csf.ClusterURL("HTTP GET"))
+	assert.Equal(t, "TCP CONNECT", csf.ClusterURL("TCP CONNECT"))
 }
