@@ -42,8 +42,8 @@ func TestClusterURL(t *testing.T) {
 	assert.Equal(t, "PATCH /user_space/", csf.ClusterURL("PATCH /user_space/"))
 	assert.Equal(t, "TRACE /user_space/", csf.ClusterURL("TRACE /user_space/"))
 	assert.Equal(t, "CONNECT /user_space/", csf.ClusterURL("CONNECT /user_space/"))
-	assert.Equal(t, "/attach", csf.ClusterURL("/attach&session_id=ddfsdsf&track_id=sjdklnfldsn"))
+	assert.Equal(t, "/attach", csf.ClusterURL("/attach?session_id=ddfsdsf&track_id=sjdklnfldsn"))
 	assert.Equal(t, "/attach", csf.ClusterURL("/attach#section-1"))
 	assert.Equal(t, "HTTP GET", csf.ClusterURL("HTTP GET"))
-	assert.Equal(t, "TCP CONNECT", csf.ClusterURL("TCP CONNECT"))
+	assert.Equal(t, "GET /api/cart", csf.ClusterURL("GET /api/cart?sessionId=55f4e5ea-5d6d-482a-80c4-799e3c72dfb0&currencyCode=USD"))
 }
