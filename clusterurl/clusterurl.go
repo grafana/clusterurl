@@ -4,44 +4,43 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/AlessandroPomponio/go-gibberish/gibberish"
 	"github.com/AlessandroPomponio/go-gibberish/structs"
 	lru "github.com/hashicorp/golang-lru/v2"
 )
 
-var classifier *structs.GibberishData
-
-const maxSegments = 10
-
-var words, _ = lru.New[string, bool](8192)
-
-//go:embed classifier.json
-var dataFile embed.FS
-
-func loadKnowledgeBase() (*structs.GibberishData, error) {
-	content, err := dataFile.ReadFile("classifier.json")
-	if err != nil {
-		return nil, fmt.Errorf("LoadKnowledgeBase: unable to read knowledge base content: %w", err)
-	}
-
-	var data structs.GibberishData
-	err = json.Unmarshal(content, &data)
-	if err != nil {
-		return nil, fmt.Errorf("LoadKnowledgeBase: unable to unmarshal knowledge base content: %w", err)
-	}
-
-	return &data, nil
+type ClusterURLClassifier struct {
+	classifier *structs.GibberishData
+	cache      *lru.Cache[string, bool]
+	cfg        *Config
 }
 
-func InitAutoClassifier() error {
-	var err error
-	classifier, err = loadKnowledgeBase()
-	if err != nil {
-		return err
+func NewClusterURLClassifier(config *Config) (*ClusterURLClassifier, error) {
+	if config == nil {
+		config = DefaultConfig()
 	}
 
-	return nil
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("NewClusterURLClassifier: invalid configuration: %w", err)
+	}
+
+	classifier, err := loadKnowledgeBase(config.ModelPath)
+	if err != nil {
+		return nil, fmt.Errorf("NewClusterURLClassifier: unable to load knowledge base: %w", err)
+	}
+
+	cache, err := lru.New[string, bool](config.CacheSize)
+	if err != nil {
+		return nil, fmt.Errorf("NewClusterURLClassifier: unable to create cache: %w", err)
+	}
+
+	return &ClusterURLClassifier{
+		classifier: classifier,
+		cache:      cache,
+		cfg:        config,
+	}, nil
 }
 
 // This function takes a path and returns a "clustered" path, where
@@ -51,7 +50,7 @@ func InitAutoClassifier() error {
 // to be grouped into a smaller number of paths.
 
 //nolint:cyclop
-func ClusterURL(path string) string {
+func (csf *ClusterURLClassifier) ClusterURL(path string) string {
 	if path == "" {
 		return path
 	}
@@ -64,25 +63,32 @@ func ClusterURL(path string) string {
 	skipGrace := true
 	nSegments := 0
 	for _, c := range p {
-		if c == '/' {
+		char := c
+		if c == '?' || c == '&' || c == '#' {
+			// Strip query string and fragment identifiers
+			p = p[:sPos]
+			break
+		}
+
+		if c == csf.cfg.Separator {
 			nSegments++
 			if skip {
-				p[sPos] = '*'
+				p[sPos] = csf.cfg.ReplaceWith
 				sPos++
 			} else if sFwd > sPos {
-				if !okWord(string(p[sPos:sFwd])) {
-					p[sPos] = '*'
+				if !csf.okWord(string(p[sPos:sFwd])) {
+					p[sPos] = csf.cfg.ReplaceWith
 					sPos++
 				} else {
 					sPos = sFwd
 				}
 			}
 
-			if nSegments >= maxSegments {
+			if nSegments >= csf.cfg.MaxSegments {
 				break
 			}
 
-			p[sPos] = '/'
+			p[sPos] = char
 			sPos++
 			sFwd = sPos
 			skip = false
@@ -90,7 +96,7 @@ func ClusterURL(path string) string {
 		} else if !skip {
 			p[sFwd] = c
 			sFwd++
-			if !isAlpha(c) {
+			if !csf.isValid(c) {
 				if skipGrace && (sFwd-sPos) == 2 {
 					skipGrace = false
 					continue
@@ -101,11 +107,11 @@ func ClusterURL(path string) string {
 	}
 
 	if skip {
-		p[sPos] = '*'
+		p[sPos] = csf.cfg.ReplaceWith
 		sPos++
 	} else if sFwd > sPos {
-		if !okWord(string(p[sPos:sFwd])) {
-			p[sPos] = '*'
+		if !csf.okWord(string(p[sPos:sFwd])) {
+			p[sPos] = csf.cfg.ReplaceWith
 			sPos++
 		} else {
 			sPos = sFwd
@@ -115,19 +121,54 @@ func ClusterURL(path string) string {
 	return string(p[:sPos])
 }
 
-func okWord(w string) bool {
-	_, ok := words.Get(w)
+func (csf *ClusterURLClassifier) okWord(w string) bool {
+	_, ok := csf.cache.Get(w)
 	if ok {
 		return ok
 	}
-	if gibberish.IsGibberish(w, classifier) {
+	if gibberish.IsGibberish(w, csf.classifier) {
 		return false
 	}
 
-	words.Add(w, true)
+	csf.cache.Add(w, true)
 	return true
 }
 
-func isAlpha(c byte) bool {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-' || c == '_'
+func (csf *ClusterURLClassifier) isValid(c byte) bool {
+	if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+		return true
+	}
+
+	for _, ac := range DefaultConfig().AdditionalValidChars {
+		if c == ac {
+			return true
+		}
+	}
+
+	return false
+}
+
+//go:embed model.json
+var dataFile embed.FS
+
+func loadKnowledgeBase(path string) (*structs.GibberishData, error) {
+	var content []byte
+	var err error
+	if path != "" {
+		content, err = os.ReadFile(path)
+	} else {
+		content, err = dataFile.ReadFile("model.json")
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("loadKnowledgeBase: unable to read knowledge base content: %w", err)
+	}
+
+	var data structs.GibberishData
+	err = json.Unmarshal(content, &data)
+	if err != nil {
+		return nil, fmt.Errorf("loadKnowledgeBase: unable to unmarshal knowledge base content: %w", err)
+	}
+
+	return &data, nil
 }
