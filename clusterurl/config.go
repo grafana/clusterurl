@@ -44,5 +44,10 @@ func (c *Config) Validate() error {
 	if c.MaxSegments > 100 {
 		return fmt.Errorf("field MaxSegments cannot be greater than 100")
 	}
+
+	if len(c.AdditionalValidChars) > 100 {
+		return fmt.Errorf("field AdditionalValidChars cannot have more than 100 characters")
+	}
+
 	return nil
 }
