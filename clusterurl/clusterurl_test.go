@@ -1,6 +1,7 @@
 package clusterurl
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -103,4 +104,28 @@ func BenchmarkClusterURLWithoutCache(b *testing.B) {
 			_ = csf.ClusterURL(testCase)
 		}
 	}
+}
+
+// TestClusterURLPanic reproduces a slice manipulation bug
+func TestClusterURLPanic(t *testing.T) {
+	classifier, err := NewClusterURLClassifier(DefaultConfig())
+	if err != nil {
+		t.Fatalf("Failed to create classifier: %v", err)
+	}
+
+	// This path triggers the "index out of range [1] with length 1" panic
+	problematicPath := strings.Repeat("/segment-with-special-chars!@#$%^&*()", 22) + "?param=value"
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Logf("panic occurred: %v", r)
+			t.Logf("path: %s", problematicPath)
+			t.Logf("length: %d, Segments: %d", len(problematicPath), strings.Count(problematicPath, "/"))
+			t.Fail()
+		} else {
+			t.Logf("no panic occurred - bug fixed")
+		}
+	}()
+
+	_ = classifier.ClusterURL(problematicPath)
 }
