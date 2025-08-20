@@ -79,10 +79,11 @@ func (csf *ClusterURLClassifier) ClusterURL(path string) string {
 	inQuery := false
 	for _, c := range []byte(path) {
 		char := c
-		if c == '?' || c == '#' || (c == '&' && inQuery) {
-			if c == '?' {
-				inQuery = true
-			}
+		if c == '?' {
+			inQuery = true
+			break
+		}
+		if c == '#' || (c == '&' && inQuery) {
 			break
 		}
 
