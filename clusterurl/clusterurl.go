@@ -69,7 +69,6 @@ func (csf *ClusterURLClassifier) ClusterURL(path string) string {
 		return path
 	}
 
-	// we will be resizing copies of this slice
 	p := make([]byte, len(path))
 	copy(p, []byte(path))
 	sPos := 0
