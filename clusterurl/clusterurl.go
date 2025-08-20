@@ -77,7 +77,7 @@ func (csf *ClusterURLClassifier) ClusterURL(path string) string {
 	skipGrace := true
 	nSegments := 0
 	inQuery := false
-	for _, c := range []byte(path) {
+	for _, c := range p {
 		char := c
 		if c == '?' {
 			inQuery = true
