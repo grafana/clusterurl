@@ -15,10 +15,6 @@ type Config struct {
 	AdditionalValidChars []byte `json:"additional_chars,omitempty"`
 	// ModelPath is the path to the model file.
 	ModelPath string `json:"model_path"`
-	// MaxPathLength is the maximum allowed path length in characters.
-	MaxPathLength int `json:"max_path_length"`
-	// EnableSanitization enables input sanitization and validation.
-	EnableSanitization bool `json:"enable_sanitization"`
 }
 
 func DefaultConfig() *Config {
@@ -27,10 +23,8 @@ func DefaultConfig() *Config {
 		Separator:            '/',
 		ReplaceWith:          '*',
 		CacheSize:            8192,
-		AdditionalValidChars: []byte{'-', '_', '.', ' '},
+		AdditionalValidChars: []byte{'-', '_', '.', ' ', '&'},
 		ModelPath:            "",
-		MaxPathLength:        1024,
-		EnableSanitization:   true,
 	}
 }
 
@@ -49,12 +43,6 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxSegments > 100 {
 		return fmt.Errorf("field MaxSegments cannot be greater than 100")
-	}
-	if c.MaxPathLength <= 0 {
-		return fmt.Errorf("field MaxPathLength must be greater than 0")
-	}
-	if c.MaxPathLength > 10000 {
-		return fmt.Errorf("field MaxPathLength cannot be greater than 10000")
 	}
 
 	if len(c.AdditionalValidChars) > 100 {
