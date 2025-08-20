@@ -75,19 +75,6 @@ func (csf *ClusterURLClassifier) ClusterURL(path string) string {
 	sPos := 0
 	sFwd := 0
 
-	// ensureCapacity helps resize the slice if needed
-	ensureCapacity := func(requiredIndex int) {
-		if requiredIndex >= len(p) {
-			newSize := len(p) * 2
-			if newSize <= requiredIndex {
-				newSize = requiredIndex + 1
-			}
-			newP := make([]byte, newSize)
-			copy(newP, p)
-			p = newP
-		}
-	}
-
 	skip := false
 	skipGrace := true
 	nSegments := 0
@@ -104,12 +91,10 @@ func (csf *ClusterURLClassifier) ClusterURL(path string) string {
 		if c == csf.cfg.Separator {
 			nSegments++
 			if skip {
-				ensureCapacity(sPos)
 				p[sPos] = csf.cfg.ReplaceWith
 				sPos++
 			} else if sFwd > sPos {
 				if !csf.okWord(string(p[sPos:sFwd])) {
-					ensureCapacity(sPos)
 					p[sPos] = csf.cfg.ReplaceWith
 					sPos++
 				} else {
@@ -121,14 +106,12 @@ func (csf *ClusterURLClassifier) ClusterURL(path string) string {
 				break
 			}
 
-			ensureCapacity(sPos)
 			p[sPos] = char
 			sPos++
 			sFwd = sPos
 			skip = false
 			skipGrace = true
 		} else if !skip {
-			ensureCapacity(sFwd)
 			p[sFwd] = c
 			sFwd++
 			if !csf.validCharTable[c] {
@@ -142,12 +125,10 @@ func (csf *ClusterURLClassifier) ClusterURL(path string) string {
 	}
 
 	if skip {
-		ensureCapacity(sPos)
 		p[sPos] = csf.cfg.ReplaceWith
 		sPos++
 	} else if sFwd > sPos {
 		if !csf.okWord(string(p[sPos:sFwd])) {
-			ensureCapacity(sPos)
 			p[sPos] = csf.cfg.ReplaceWith
 			sPos++
 		} else {
