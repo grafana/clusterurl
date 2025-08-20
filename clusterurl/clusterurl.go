@@ -69,8 +69,7 @@ func (csf *ClusterURLClassifier) ClusterURL(path string) string {
 		return path
 	}
 
-	p := make([]byte, len(path))
-	copy(p, []byte(path))
+	p := []byte(path)
 	sPos := 0
 	sFwd := 0
 
