@@ -23,7 +23,7 @@ func DefaultConfig() *Config {
 		Separator:            '/',
 		ReplaceWith:          '*',
 		CacheSize:            8192,
-		AdditionalValidChars: []byte{'-', '_', '.', ' ', '&'},
+		AdditionalValidChars: []byte{'-', '_', '.', ' '},
 		ModelPath:            "",
 	}
 }
