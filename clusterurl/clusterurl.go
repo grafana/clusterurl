@@ -76,11 +76,14 @@ func (csf *ClusterURLClassifier) ClusterURL(path string) string {
 	skip := false
 	skipGrace := true
 	nSegments := 0
+	inQuery := false
 	for _, c := range p {
 		char := c
-		if c == '?' || c == '&' || c == '#' {
-			// Strip query string and fragment identifiers
-			p = p[:sPos]
+		if c == '?' {
+			inQuery = true
+			break
+		}
+		if c == '#' || (c == '&' && inQuery) {
 			break
 		}
 
