@@ -87,6 +87,32 @@ func BenchmarkClusterURLWithCache(b *testing.B) {
 	}
 }
 
+// Fuzz test to catch panics in ClusterURL
+func FuzzClusterURL(f *testing.F) {
+	csf, err := NewClusterURLClassifier(DefaultConfig())
+	if err != nil {
+		f.Fatalf("failed to create classifier: %v", err)
+	}
+
+	// Add some interesting seed inputs
+	f.Add("")
+	f.Add("&?*#")
+	f.Add("/users/123/job/456")
+	f.Add("123/ljgdflgjf")
+	f.Add("/a/b/c/d/e/f/g/h/i/j")
+	f.Add("\x00\xff\xfe\xfd") // binary junk
+	f.Add("GET /api/cart?sessionId=55f4e5ea-5d6d-482a-80c4-799e3c72dfb0&currencyCode=USD")
+
+	f.Fuzz(func(t *testing.T, input string) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("panic for input %q: %v", input, r)
+			}
+		}()
+		_ = csf.ClusterURL(input)
+	})
+}
+
 func BenchmarkClusterURLWithoutCache(b *testing.B) {
 	cfg := DefaultConfig()
 	cfg.CacheSize = 1

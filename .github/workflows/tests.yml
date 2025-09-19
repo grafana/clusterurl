@@ -23,3 +23,6 @@ jobs:
 
     - name: Run tests
       run: go test -v ./...
+
+    - name: Run fuzz tests
+      run: go test -fuzz=FuzzClusterURL -fuzztime=30s ./pkg/clusterurl
