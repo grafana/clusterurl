@@ -76,14 +76,21 @@ func (csf *ClusterURLClassifier) ClusterURL(path string) string {
 	skip := false
 	skipGrace := true
 	nSegments := 0
-	inQuery := false
 	for _, c := range p {
 		char := c
-		if c == '?' {
-			inQuery = true
-			break
-		}
-		if c == '#' || (c == '&' && inQuery) {
+
+		// Strip query string and fragment identifiers
+		if c == '?' || c == '&' || c == '#' {
+			if skip && sPos < len(p) {
+				// no other chars, just use ReplaceWith
+				p[sPos] = csf.cfg.ReplaceWith
+				sPos++
+			} else if !skip && sFwd > sPos {
+				// preserve chars
+				sPos = sFwd
+			}
+
+			p = p[:sPos]
 			break
 		}
 
@@ -123,13 +130,22 @@ func (csf *ClusterURLClassifier) ClusterURL(path string) string {
 		}
 	}
 
+	// this can happen if we have path with ?, & or # and all invalid chars, but no /
+	if len(p) == 0 {
+		return ""
+	}
+
 	if skip {
-		p[sPos] = csf.cfg.ReplaceWith
-		sPos++
-	} else if sFwd > sPos {
-		if !csf.okWord(string(p[sPos:sFwd])) {
+		if sPos < len(p) {
 			p[sPos] = csf.cfg.ReplaceWith
 			sPos++
+		}
+	} else if sFwd > sPos {
+		if !csf.okWord(string(p[sPos:sFwd])) {
+			if sPos < len(p) {
+				p[sPos] = csf.cfg.ReplaceWith
+				sPos++
+			}
 		} else {
 			sPos = sFwd
 		}
