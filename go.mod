@@ -4,7 +4,7 @@ go 1.20
 
 require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/stretchr/testify v1.8.4
+	github.com/stretchr/testify v1.11.1
 )
 
 require (
