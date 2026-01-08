@@ -78,9 +78,9 @@ func TestClusterURLWithWordRules(t *testing.T) {
 	assert.Equal(t, "/pods/*", csf.ClusterURL("/pods/nginx-deployment-5d4f7c8b9"))
 
 	// Hex strings of specific lengths should collapse (7, 8, 12, 40 chars)
-	assert.Equal(t, "/commits/*", csf.ClusterURL("/commits/abc1234"))       // 7 hex chars
-	assert.Equal(t, "/commits/*", csf.ClusterURL("/commits/abc12345"))      // 8 hex chars
-	assert.Equal(t, "/commits/*", csf.ClusterURL("/commits/abc123456789"))  // 12 hex chars
+	assert.Equal(t, "/commits/*", csf.ClusterURL("/commits/abc1234"))      // 7 hex chars
+	assert.Equal(t, "/commits/*", csf.ClusterURL("/commits/abc12345"))     // 8 hex chars
+	assert.Equal(t, "/commits/*", csf.ClusterURL("/commits/abc123456789")) // 12 hex chars
 
 	// Too long segments should collapse
 	longSegment := "this-is-a-very-long-segment-name-that-exceeds-the-limit"
@@ -110,6 +110,79 @@ func TestClusterURLWordRulesCustomWordList(t *testing.T) {
 	// Custom denylist - "internal" always collapses
 	assert.Equal(t, "/api/*", csf.ClusterURL("/api/internal"))
 	assert.Equal(t, "/*/data", csf.ClusterURL("/debug/data"))
+}
+
+func TestResourceValueRule(t *testing.T) {
+	// This test demonstrates collapsing ANY value immediately after a resource type
+	// e.g., /books/harry-potter -> /books/*
+	cfg := DefaultConfig()
+	cfg.EnableWordRules = true
+	cfg.WordList = &WordList{
+		GlobalAllow: toSet([]string{"books", "movies", "authors", "genres"}),
+		GlobalDeny:  toSet([]string{}),
+		DepthAllow:  map[int]map[string]struct{}{},
+		DepthDeny:   map[int]map[string]struct{}{},
+	}
+	// Use ResourceValueRule to collapse anything immediately after allowlisted segments
+	cfg.Rules = []CollapseRule{
+		DenylistRule{},
+		AllowlistRule{},
+		ResourceValueRule{}, // This is the key - collapses any value after resource type
+		LengthRule{MaxLength: 32},
+		PatternRule{},
+	}
+
+	csf, err := NewClusterURLClassifier(cfg)
+	assert.NoError(t, err)
+
+	// Word values after resource types should collapse
+	assert.Equal(t, "/books/*", csf.ClusterURL("/books/harry-potter"))
+	assert.Equal(t, "/books/*", csf.ClusterURL("/books/jason-bourne"))
+	assert.Equal(t, "/books/*", csf.ClusterURL("/books/the-great-gatsby"))
+	assert.Equal(t, "/movies/*", csf.ClusterURL("/movies/star-wars"))
+	assert.Equal(t, "/movies/*", csf.ClusterURL("/movies/the-godfather"))
+
+	// Nested resources work too
+	assert.Equal(t, "/authors/*/books/*", csf.ClusterURL("/authors/tolkien/books/hobbit"))
+	assert.Equal(t, "/books/*/genres/*", csf.ClusterURL("/books/dune/genres/sci-fi"))
+
+	// Resource types themselves are preserved
+	assert.Equal(t, "/books/", csf.ClusterURL("/books/"))
+	assert.Equal(t, "/api/books/*", csf.ClusterURL("/api/books/something"))
+}
+
+func TestNonAllowlistedRule(t *testing.T) {
+	// NonAllowlistedRule treats allowlist as the complete vocabulary.
+	// Anything NOT in the allowlist collapses, regardless of position.
+	cfg := DefaultConfig()
+	cfg.EnableWordRules = true
+	cfg.WordList = &WordList{
+		GlobalAllow: toSet([]string{"api", "v1", "books", "chapters", "authors", "reviews"}),
+		GlobalDeny:  toSet([]string{}),
+		DepthAllow:  map[int]map[string]struct{}{},
+		DepthDeny:   map[int]map[string]struct{}{},
+	}
+	cfg.Rules = []CollapseRule{
+		DenylistRule{},
+		NonAllowlistedRule{}, // Key: if not in allowlist, collapse
+	}
+
+	csf, err := NewClusterURLClassifier(cfg)
+	assert.NoError(t, err)
+
+	// Known vocabulary preserved, everything else collapsed
+	assert.Equal(t, "/api/v1/books/*", csf.ClusterURL("/api/v1/books/harry-potter"))
+	assert.Equal(t, "/api/v1/books/*", csf.ClusterURL("/api/v1/books/the-great-gatsby"))
+	assert.Equal(t, "/api/v1/books/*/chapters/*", csf.ClusterURL("/api/v1/books/dune/chapters/intro"))
+	assert.Equal(t, "/books/*/authors/*", csf.ClusterURL("/books/1984/authors/orwell"))
+	assert.Equal(t, "/books/*/reviews", csf.ClusterURL("/books/something/reviews"))
+
+	// Multiple unknown segments in a row
+	assert.Equal(t, "/api/*/*/books/*", csf.ClusterURL("/api/unknown/stuff/books/title"))
+
+	// All known -> nothing collapses
+	assert.Equal(t, "/api/v1/books", csf.ClusterURL("/api/v1/books"))
+	assert.Equal(t, "/books/chapters", csf.ClusterURL("/books/chapters"))
 }
 
 func TestWordRulesDisabledByDefault(t *testing.T) {

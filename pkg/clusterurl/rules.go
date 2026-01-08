@@ -84,6 +84,80 @@ func (r NumericPrefixRule) ShouldCollapse(segment string, depth int, ctx *RuleCo
 	return false, false
 }
 
+// ResourceValueRule collapses ANY segment that immediately follows an allowlisted resource type.
+// Use this when allowlisted segments represent collection names whose values are high-cardinality.
+// E.g., if "books" is allowlisted: /books/harry-potter -> /books/*
+// Note: This only works for immediate followers. For broader collapsing, see NonAllowlistedRule.
+type ResourceValueRule struct{}
+
+func (r ResourceValueRule) ShouldCollapse(segment string, depth int, ctx *RuleContext) (collapse, handled bool) {
+	if ctx.PrevSegment == "" {
+		return false, false
+	}
+
+	lower := strings.ToLower(ctx.PrevSegment)
+	if _, ok := ctx.WordList.GlobalAllow[lower]; ok {
+		// Previous segment is a resource type, collapse this value
+		return true, true
+	}
+
+	return false, false
+}
+
+// NonAllowlistedRule collapses any segment that is not in the allowlist.
+// This treats the allowlist as the complete set of valid path keywords;
+// everything else is considered high-cardinality and collapsed.
+// E.g., with allowlist {api, v1, books, chapters}:
+//
+//	/api/v1/books/harry-potter/chapters/intro -> /api/v1/books/*/chapters/*
+type NonAllowlistedRule struct{}
+
+func (r NonAllowlistedRule) ShouldCollapse(segment string, depth int, ctx *RuleContext) (collapse, handled bool) {
+	lower := strings.ToLower(segment)
+
+	// Check if in global allowlist
+	if _, ok := ctx.WordList.GlobalAllow[lower]; ok {
+		return false, true // preserve
+	}
+
+	// Check depth-specific allowlist
+	if depthSet, ok := ctx.WordList.DepthAllow[depth]; ok {
+		if _, ok := depthSet[lower]; ok {
+			return false, true // preserve
+		}
+	}
+
+	// Not allowlisted -> collapse
+	return true, true
+}
+
+// LastSegmentRule collapses the final segment of a path (unless it's allowlisted).
+// Useful when the last segment is typically a resource ID or name.
+// Requires TotalDepth to be set in RuleContext.
+// E.g., /api/books/harry-potter -> /api/books/* (if depth matches TotalDepth-1)
+type LastSegmentRule struct{}
+
+func (r LastSegmentRule) ShouldCollapse(segment string, depth int, ctx *RuleContext) (collapse, handled bool) {
+	// Only act on last segment
+	if ctx.TotalDepth < 0 || depth != ctx.TotalDepth-1 {
+		return false, false
+	}
+
+	lower := strings.ToLower(segment)
+
+	// Don't collapse if allowlisted
+	if _, ok := ctx.WordList.GlobalAllow[lower]; ok {
+		return false, false
+	}
+	if depthSet, ok := ctx.WordList.DepthAllow[depth]; ok {
+		if _, ok := depthSet[lower]; ok {
+			return false, false
+		}
+	}
+
+	return true, true
+}
+
 // LengthRule collapses segments that are too long to be meaningful keywords
 type LengthRule struct {
 	MaxLength int // default 32
@@ -174,4 +248,3 @@ func DefaultRules() []CollapseRule {
 		NumericPrefixRule{},
 	}
 }
-
