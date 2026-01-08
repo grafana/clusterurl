@@ -16,6 +16,10 @@ type ClusterURLClassifier struct {
 	cache          *lru.Cache[string, bool]
 	cfg            *Config
 	validCharTable [256]bool
+
+	// Word-based collapsing (Proposal 3)
+	wordList *WordList
+	rules    []CollapseRule
 }
 
 func NewClusterURLClassifier(config *Config) (*ClusterURLClassifier, error) {
@@ -49,11 +53,23 @@ func NewClusterURLClassifier(config *Config) (*ClusterURLClassifier, error) {
 		validCharTable[c] = true
 	}
 
+	// Initialize word-based collapsing (Proposal 3)
+	wordList := config.WordList
+	if wordList == nil {
+		wordList = DefaultWordList()
+	}
+	rules := config.Rules
+	if rules == nil {
+		rules = DefaultRules()
+	}
+
 	return &ClusterURLClassifier{
 		classifier:     classifier,
 		cache:          cache,
 		cfg:            config,
 		validCharTable: validCharTable,
+		wordList:       wordList,
+		rules:          rules,
 	}, nil
 }
 
@@ -76,6 +92,7 @@ func (csf *ClusterURLClassifier) ClusterURL(path string) string {
 	skip := false
 	skipGrace := true
 	nSegments := 0
+	prevSegment := "" // Track previous segment for word rules
 	for _, c := range p {
 		char := c
 
@@ -99,12 +116,16 @@ func (csf *ClusterURLClassifier) ClusterURL(path string) string {
 			if skip {
 				p[sPos] = csf.cfg.ReplaceWith
 				sPos++
+				prevSegment = ""
 			} else if sFwd > sPos {
-				if !csf.okWord(string(p[sPos:sFwd])) {
+				segment := string(p[sPos:sFwd])
+				if !csf.checkSegment(segment, nSegments-1, prevSegment) {
 					p[sPos] = csf.cfg.ReplaceWith
 					sPos++
+					prevSegment = ""
 				} else {
 					sPos = sFwd
+					prevSegment = segment
 				}
 			}
 
@@ -141,7 +162,8 @@ func (csf *ClusterURLClassifier) ClusterURL(path string) string {
 			sPos++
 		}
 	} else if sFwd > sPos {
-		if !csf.okWord(string(p[sPos:sFwd])) {
+		segment := string(p[sPos:sFwd])
+		if !csf.checkSegment(segment, nSegments, prevSegment) {
 			if sPos < len(p) {
 				p[sPos] = csf.cfg.ReplaceWith
 				sPos++
@@ -154,12 +176,55 @@ func (csf *ClusterURLClassifier) ClusterURL(path string) string {
 	return string(p[:sPos])
 }
 
+// checkSegment decides whether to keep or collapse a segment.
+// When EnableWordRules is true, uses depth-aware rules; otherwise falls back to gibberish detection.
+func (csf *ClusterURLClassifier) checkSegment(segment string, depth int, prevSegment string) bool {
+	if csf.cfg.EnableWordRules {
+		return csf.okWordWithDepth(segment, depth, prevSegment)
+	}
+	return csf.okWord(segment)
+}
+
 func (csf *ClusterURLClassifier) okWord(w string) bool {
 	_, ok := csf.cache.Get(w)
 	if ok {
 		return ok
 	}
 	if gibberish.IsGibberish(w, csf.classifier) {
+		return false
+	}
+
+	csf.cache.Add(w, true)
+	return true
+}
+
+// okWordWithDepth evaluates word-based collapsing rules before falling back to gibberish detection.
+// This is the Proposal 3 extension for deterministic, depth-aware collapsing.
+func (csf *ClusterURLClassifier) okWordWithDepth(w string, depth int, prevSegment string) bool {
+	// Fast path: check cache first
+	if cached, ok := csf.cache.Get(w); ok {
+		return cached
+	}
+
+	ctx := &RuleContext{
+		WordList:    csf.wordList,
+		PrevSegment: prevSegment,
+		TotalDepth:  -1,
+	}
+
+	// Evaluate rules in order
+	for _, rule := range csf.rules {
+		collapse, handled := rule.ShouldCollapse(w, depth, ctx)
+		if handled {
+			result := !collapse
+			csf.cache.Add(w, result)
+			return result
+		}
+	}
+
+	// Fallback to gibberish detection
+	if gibberish.IsGibberish(w, csf.classifier) {
+		csf.cache.Add(w, false)
 		return false
 	}
 

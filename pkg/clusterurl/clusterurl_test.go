@@ -59,6 +59,72 @@ func TestClusterURL(t *testing.T) {
 	assert.Equal(t, "/a/b/c/d/e/f/g/h/i", csf.ClusterURL("/a/b/c/d/e/f/g/h/i/j"))
 }
 
+func TestClusterURLWithWordRules(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.EnableWordRules = true
+	csf, err := NewClusterURLClassifier(cfg)
+	assert.NoError(t, err)
+
+	// Allowlisted segments should be preserved
+	assert.Equal(t, "/users/*", csf.ClusterURL("/users/123"))
+	assert.Equal(t, "/api/users/*", csf.ClusterURL("/api/users/abc123"))
+
+	// Segments after allowlisted resources starting with digit should collapse
+	assert.Equal(t, "/users/*", csf.ClusterURL("/users/42"))
+	assert.Equal(t, "/accounts/*/settings", csf.ClusterURL("/accounts/12345/settings"))
+
+	// K8s-style names with trailing hash (2+ hyphens, 5-10 char alphanumeric suffix) should collapse
+	assert.Equal(t, "/deployments/*", csf.ClusterURL("/deployments/my-app-abc12def"))
+	assert.Equal(t, "/pods/*", csf.ClusterURL("/pods/nginx-deployment-5d4f7c8b9"))
+
+	// Hex strings of specific lengths should collapse (7, 8, 12, 40 chars)
+	assert.Equal(t, "/commits/*", csf.ClusterURL("/commits/abc1234"))       // 7 hex chars
+	assert.Equal(t, "/commits/*", csf.ClusterURL("/commits/abc12345"))      // 8 hex chars
+	assert.Equal(t, "/commits/*", csf.ClusterURL("/commits/abc123456789"))  // 12 hex chars
+
+	// Too long segments should collapse
+	longSegment := "this-is-a-very-long-segment-name-that-exceeds-the-limit"
+	assert.Equal(t, "/api/*", csf.ClusterURL("/api/"+longSegment))
+
+	// Non-gibberish, non-allowlisted words should still be preserved by gibberish check
+	assert.Equal(t, "/books/harry-potter", csf.ClusterURL("/books/harry-potter"))
+	assert.Equal(t, "/movies/star-wars", csf.ClusterURL("/movies/star-wars"))
+}
+
+func TestClusterURLWordRulesCustomWordList(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.EnableWordRules = true
+	cfg.WordList = &WordList{
+		GlobalAllow: toSet([]string{"books", "movies", "authors"}),
+		GlobalDeny:  toSet([]string{"internal", "debug"}),
+		DepthAllow:  map[int]map[string]struct{}{},
+		DepthDeny:   map[int]map[string]struct{}{},
+	}
+	csf, err := NewClusterURLClassifier(cfg)
+	assert.NoError(t, err)
+
+	// Custom allowlist
+	assert.Equal(t, "/books/*", csf.ClusterURL("/books/123"))
+	assert.Equal(t, "/authors/*", csf.ClusterURL("/authors/456"))
+
+	// Custom denylist - "internal" always collapses
+	assert.Equal(t, "/api/*", csf.ClusterURL("/api/internal"))
+	assert.Equal(t, "/*/data", csf.ClusterURL("/debug/data"))
+}
+
+func TestWordRulesDisabledByDefault(t *testing.T) {
+	// Default config should NOT enable word rules
+	cfg := DefaultConfig()
+	assert.False(t, cfg.EnableWordRules)
+
+	csf, err := NewClusterURLClassifier(cfg)
+	assert.NoError(t, err)
+
+	// Without word rules, behavior should match original
+	// (gibberish detection only)
+	assert.Equal(t, "/users/*/j4elk/*/job/*", csf.ClusterURL("/users/fdklsd/j4elk/23993/job/2"))
+}
+
 func BenchmarkClusterURLWithCache(b *testing.B) {
 	cfg := DefaultConfig()
 	cfg.CacheSize = 1000

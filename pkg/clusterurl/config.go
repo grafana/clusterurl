@@ -15,6 +15,14 @@ type Config struct {
 	AdditionalValidChars []byte `json:"additional_chars,omitempty"`
 	// ModelPath is the path to the model file.
 	ModelPath string `json:"model_path"`
+
+	// WordList for static allow/deny lists. nil = use DefaultWordList().
+	WordList *WordList `json:"-"`
+	// Rules for collapsing heuristics. nil = use DefaultRules().
+	Rules []CollapseRule `json:"-"`
+	// EnableWordRules enables the word-based collapsing rules.
+	// When false, only gibberish detection is used (original behavior).
+	EnableWordRules bool `json:"enable_word_rules"`
 }
 
 func DefaultConfig() *Config {
