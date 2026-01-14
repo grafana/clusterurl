@@ -14,18 +14,26 @@ type pathNode struct {
 	// children maps segment strings to child nodes
 	children map[string]*pathNode
 
-	// collapsed indicates if this node's children have been collapsed to a wildcard
-	collapsed bool
+	// softCollapsed indicates this node has passed the soft threshold.
+	// New children will be directed to the wildcard, but existing children are preserved.
+	softCollapsed bool
 
-	// cardinality tracks the number of distinct children observed
-	cardinality int
+	// hardCollapsed indicates this node has passed the hard threshold.
+	// All children have been merged into a single wildcard.
+	hardCollapsed bool
+
+	// uniqueChildrenSeen tracks the total number of unique children ever seen.
+	// Used to determine when to trigger hard collapse.
+	uniqueChildrenSeen int
 
 	// isWildcard indicates if this node represents a collapsed wildcard
 	isWildcard bool
 }
 
 // PathTrie is a thread-safe trie for clustering URL paths.
-// It dynamically collapses high-cardinality segments into wildcards.
+// It uses a two-threshold system:
+// - Soft threshold: After N unique children, new children go to wildcard but existing are preserved
+// - Hard threshold: After M unique children, all children collapse to a single wildcard
 type PathTrie struct {
 	root *pathNode
 	mu   sync.RWMutex
@@ -52,19 +60,30 @@ func NewPathTrie(config *TrieConfig) (*PathTrie, error) {
 	}, nil
 }
 
-// getMaxCardinality returns the max cardinality for a given depth.
-// It checks DepthCardinalities first, then falls back to DefaultMaxCardinality.
-// A value of -1 in DepthCardinalities means no limit (never collapse).
-func (t *PathTrie) getMaxCardinality(depth int) int {
-	if t.cfg.DepthCardinalities != nil {
-		if card, ok := t.cfg.DepthCardinalities[depth]; ok {
+// getSoftMaxCardinality returns the soft max cardinality for a given depth.
+func (t *PathTrie) getSoftMaxCardinality(depth int) int {
+	if t.cfg.DepthSoftCardinalities != nil {
+		if card, ok := t.cfg.DepthSoftCardinalities[depth]; ok {
 			if card == -1 {
 				return math.MaxInt
 			}
 			return card
 		}
 	}
-	return t.cfg.DefaultMaxCardinality
+	return t.cfg.SoftMaxCardinality
+}
+
+// getHardMaxCardinality returns the hard max cardinality for a given depth.
+func (t *PathTrie) getHardMaxCardinality(depth int) int {
+	if t.cfg.DepthHardCardinalities != nil {
+		if card, ok := t.cfg.DepthHardCardinalities[depth]; ok {
+			if card == -1 {
+				return math.MaxInt
+			}
+			return card
+		}
+	}
+	return t.cfg.HardMaxCardinality
 }
 
 // parsePath splits a path into segments, handling query strings and edge cases.
@@ -101,7 +120,9 @@ func isHTTPMethod(op string) bool {
 }
 
 // Insert adds a path to the trie and returns the normalized/clustered path.
-// If a segment exceeds maxCardinality, it collapses to the wildcard.
+// Uses two-threshold collapsing:
+// - After soft threshold: new children go to wildcard, existing preserved
+// - After hard threshold: all children collapse to wildcard
 // Thread-safe.
 func (t *PathTrie) Insert(path string) string {
 	t.mu.Lock()
@@ -133,53 +154,78 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 			break
 		}
 
-		// If current node is already collapsed, all children become wildcards
-		if current.collapsed {
+		// Case 1: Node is hard collapsed - everything goes to wildcard
+		if current.hardCollapsed {
 			result = append(result, t.cfg.ReplaceWith)
-			// Continue with the wildcard child
-			if current.children[t.cfg.ReplaceWith] == nil {
-				current.children[t.cfg.ReplaceWith] = &pathNode{
-					segment:    t.cfg.ReplaceWith,
-					children:   make(map[string]*pathNode),
-					isWildcard: true,
-				}
-			}
-			current = current.children[t.cfg.ReplaceWith]
+			current = t.getOrCreateWildcard(current)
 			continue
 		}
 
-		// Check if this segment already exists
-		child, exists := current.children[segment]
+		// Case 2: Node is soft collapsed - check if segment exists or use wildcard
+		if current.softCollapsed {
+			// Check if this segment is one of the preserved explicit children
+			if child, exists := current.children[segment]; exists && segment != t.cfg.ReplaceWith {
+				result = append(result, segment)
+				current = child
+				continue
+			}
 
-		if !exists {
-			maxCard := t.getMaxCardinality(depth)
+			// New segment after soft collapse - count it and use wildcard
+			current.uniqueChildrenSeen++
 
-			// New segment - check if we need to collapse
-			if current.cardinality >= maxCard {
-				// Collapse this level
-				t.collapseNode(current)
+			// Check if we've hit the hard threshold
+			hardMax := t.getHardMaxCardinality(depth)
+			if current.uniqueChildrenSeen > hardMax {
+				t.hardCollapseNode(current)
 				result = append(result, t.cfg.ReplaceWith)
 				current = current.children[t.cfg.ReplaceWith]
 				continue
 			}
 
-			// Create new child
-			child = &pathNode{
-				segment:  segment,
-				children: make(map[string]*pathNode),
-			}
-			current.children[segment] = child
-			current.cardinality++
-
-			// Check if we just hit the threshold
-			if current.cardinality > maxCard {
-				t.collapseNode(current)
-				result = append(result, t.cfg.ReplaceWith)
-				current = current.children[t.cfg.ReplaceWith]
-				continue
-			}
+			// Use wildcard
+			result = append(result, t.cfg.ReplaceWith)
+			current = t.getOrCreateWildcard(current)
+			continue
 		}
 
+		// Case 3: Normal operation - not yet soft collapsed
+		child, exists := current.children[segment]
+
+		if exists {
+			result = append(result, segment)
+			current = child
+			continue
+		}
+
+		// New segment - check soft threshold
+		current.uniqueChildrenSeen++
+		softMax := t.getSoftMaxCardinality(depth)
+
+		if current.uniqueChildrenSeen > softMax {
+			// Hit soft threshold - mark as soft collapsed
+			current.softCollapsed = true
+
+			// Check if we also hit hard threshold
+			hardMax := t.getHardMaxCardinality(depth)
+			if current.uniqueChildrenSeen > hardMax {
+				t.hardCollapseNode(current)
+				result = append(result, t.cfg.ReplaceWith)
+				current = current.children[t.cfg.ReplaceWith]
+				continue
+			}
+
+			// Soft collapse only - use wildcard for this new segment
+			result = append(result, t.cfg.ReplaceWith)
+			current = t.getOrCreateWildcard(current)
+			continue
+		}
+
+		// Under soft threshold - create new explicit child
+		child = &pathNode{
+			segment:  segment,
+			children: make(map[string]*pathNode),
+		}
+		current.children[segment] = child
 		result = append(result, segment)
 		current = child
 	}
@@ -187,26 +233,31 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 	return result
 }
 
-// collapseNode collapses a node by replacing all children with a single wildcard
-// and merging their children into the wildcard node.
-func (t *PathTrie) collapseNode(node *pathNode) {
-	if node.collapsed {
-		return
-	}
-
-	node.collapsed = true
-
-	// Create or get wildcard node
-	wildcardNode, hasWildcard := node.children[t.cfg.ReplaceWith]
-	if !hasWildcard {
-		wildcardNode = &pathNode{
+// getOrCreateWildcard returns the wildcard child of a node, creating it if needed.
+func (t *PathTrie) getOrCreateWildcard(node *pathNode) *pathNode {
+	if node.children[t.cfg.ReplaceWith] == nil {
+		node.children[t.cfg.ReplaceWith] = &pathNode{
 			segment:    t.cfg.ReplaceWith,
 			children:   make(map[string]*pathNode),
 			isWildcard: true,
 		}
 	}
+	return node.children[t.cfg.ReplaceWith]
+}
 
-	// Merge all children into the wildcard node
+// hardCollapseNode performs a hard collapse: merges all children into a single wildcard.
+func (t *PathTrie) hardCollapseNode(node *pathNode) {
+	if node.hardCollapsed {
+		return
+	}
+
+	node.hardCollapsed = true
+	node.softCollapsed = true
+
+	// Create or get wildcard node
+	wildcardNode := t.getOrCreateWildcard(node)
+
+	// Merge all explicit children into the wildcard node
 	for segment, child := range node.children {
 		if segment == t.cfg.ReplaceWith {
 			continue // Skip the wildcard itself
@@ -218,26 +269,36 @@ func (t *PathTrie) collapseNode(node *pathNode) {
 	node.children = map[string]*pathNode{
 		t.cfg.ReplaceWith: wildcardNode,
 	}
-	node.cardinality = 1
 
-	// Recursively check if wildcard node needs collapsing
-	// Use depth 0 for the wildcard node's children since we don't track depth in nodes
-	if wildcardNode.cardinality > t.cfg.DefaultMaxCardinality {
-		t.collapseNode(wildcardNode)
+	// Recursively check if wildcard node needs hard collapsing
+	// Use default thresholds for merged nodes
+	if wildcardNode.uniqueChildrenSeen > t.cfg.HardMaxCardinality {
+		t.hardCollapseNode(wildcardNode)
 	}
 }
 
 // mergeChildren merges children from source into target.
-// This is called during collapse to combine all child paths.
+// This is called during hard collapse to combine all child paths.
 func (t *PathTrie) mergeChildren(target, source *pathNode) {
 	for segment, child := range source.children {
 		if existing, exists := target.children[segment]; exists {
 			// Child already exists, recursively merge their children
 			t.mergeChildren(existing, child)
+			// Inherit collapse state
+			if child.softCollapsed {
+				existing.softCollapsed = true
+			}
+			if child.hardCollapsed {
+				existing.hardCollapsed = true
+			}
+			// Take max of uniqueChildrenSeen
+			if child.uniqueChildrenSeen > existing.uniqueChildrenSeen {
+				existing.uniqueChildrenSeen = child.uniqueChildrenSeen
+			}
 		} else {
 			// New child, add it
 			target.children[segment] = child
-			target.cardinality++
+			target.uniqueChildrenSeen++
 		}
 	}
 }
@@ -268,34 +329,37 @@ func (t *PathTrie) lookupSegments(segments []string) []string {
 			continue
 		}
 
-		// If node is collapsed, use wildcard
-		if current.collapsed {
+		// If node is hard collapsed, use wildcard
+		if current.hardCollapsed {
 			result = append(result, t.cfg.ReplaceWith)
 			current = current.children[t.cfg.ReplaceWith]
 			if current == nil {
-				// Can't traverse further, append remaining as-is
 				result = append(result, segments[i+1:]...)
 				break
 			}
 			continue
 		}
 
-		// Try to find exact match
+		// Try to find exact match first
 		child, exists := current.children[segment]
-		if !exists {
-			// No exact match, check for wildcard
+		if exists {
+			result = append(result, segment)
+			current = child
+			continue
+		}
+
+		// If soft collapsed, check for wildcard
+		if current.softCollapsed {
 			if wildcardChild, hasWildcard := current.children[t.cfg.ReplaceWith]; hasWildcard {
 				result = append(result, t.cfg.ReplaceWith)
 				current = wildcardChild
 				continue
 			}
-			// Not found at all, append remaining segments as-is
-			result = append(result, segments[i:]...)
-			break
 		}
 
-		result = append(result, segment)
-		current = child
+		// Not found at all, append remaining segments as-is
+		result = append(result, segments[i:]...)
+		break
 	}
 
 	return result

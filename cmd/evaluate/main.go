@@ -12,10 +12,12 @@ import (
 
 func main() {
 	urlsFile := flag.String("urls", "assets/urls-list.txt", "Path to URLs file")
-	maxCard := flag.Int("max-card", 50, "Default max cardinality")
-	depth0Card := flag.Int("depth0-card", 0, "Cardinality override for depth 0 (0 = use default)")
-	depth1Card := flag.Int("depth1-card", 0, "Cardinality override for depth 1 (0 = use default)")
-	depth2Card := flag.Int("depth2-card", 0, "Cardinality override for depth 2 (0 = use default)")
+	softCard := flag.Int("soft", 10, "Soft max cardinality (preserve first N, then wildcard)")
+	hardCard := flag.Int("hard", 100, "Hard max cardinality (collapse all after N)")
+	depth0Soft := flag.Int("depth0-soft", 0, "Soft cardinality override for depth 0 (0 = use default, -1 = no limit)")
+	depth1Soft := flag.Int("depth1-soft", 0, "Soft cardinality override for depth 1 (0 = use default, -1 = no limit)")
+	depth0Hard := flag.Int("depth0-hard", 0, "Hard cardinality override for depth 0 (0 = use default, -1 = no limit)")
+	depth1Hard := flag.Int("depth1-hard", 0, "Hard cardinality override for depth 1 (0 = use default, -1 = no limit)")
 	topN := flag.Int("top", 20, "Number of top clusters to show")
 	flag.Parse()
 
@@ -25,23 +27,30 @@ func main() {
 		os.Exit(1)
 	}
 
-	depthCards := make(map[int]int)
-	if *depth0Card != 0 {
-		depthCards[0] = *depth0Card
+	depthSoftCards := make(map[int]int)
+	if *depth0Soft != 0 {
+		depthSoftCards[0] = *depth0Soft
 	}
-	if *depth1Card != 0 {
-		depthCards[1] = *depth1Card
+	if *depth1Soft != 0 {
+		depthSoftCards[1] = *depth1Soft
 	}
-	if *depth2Card != 0 {
-		depthCards[2] = *depth2Card
+
+	depthHardCards := make(map[int]int)
+	if *depth0Hard != 0 {
+		depthHardCards[0] = *depth0Hard
+	}
+	if *depth1Hard != 0 {
+		depthHardCards[1] = *depth1Hard
 	}
 
 	cfg := &trie.TrieConfig{
-		DefaultMaxCardinality: *maxCard,
-		DepthCardinalities:    depthCards,
-		ReplaceWith:           "*",
-		Separator:             "/",
-		MaxDepth:              20,
+		SoftMaxCardinality:     *softCard,
+		HardMaxCardinality:     *hardCard,
+		DepthSoftCardinalities: depthSoftCards,
+		DepthHardCardinalities: depthHardCards,
+		ReplaceWith:            "*",
+		Separator:              "/",
+		MaxDepth:               20,
 	}
 
 	t, err := trie.NewPathTrie(cfg)
@@ -50,14 +59,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// prime the trie.
+	// Prime the trie
 	for _, url := range urls {
 		t.Insert(url)
 	}
 
 	clustered := make(map[string]int)
 	for _, url := range urls {
-		result := t.Insert(url)
+		result := t.Lookup(url)
 		clustered[result]++
 	}
 
