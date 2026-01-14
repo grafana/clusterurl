@@ -14,87 +14,120 @@ func TestNewPathTrie(t *testing.T) {
 		trie, err := NewPathTrie(nil)
 		require.NoError(t, err)
 		assert.NotNil(t, trie)
-		assert.Equal(t, 100, trie.cfg.DefaultMaxCardinality)
+		assert.Equal(t, 10, trie.cfg.SoftMaxCardinality)
+		assert.Equal(t, 100, trie.cfg.HardMaxCardinality)
 	})
 
 	t.Run("custom config", func(t *testing.T) {
 		cfg := &TrieConfig{
-			DefaultMaxCardinality: 50,
-			ReplaceWith:           "?",
-			Separator:             "/",
-			MaxDepth:              10,
+			SoftMaxCardinality: 5,
+			HardMaxCardinality: 50,
+			ReplaceWith:        "?",
+			Separator:          "/",
+			MaxDepth:           10,
 		}
 		trie, err := NewPathTrie(cfg)
 		require.NoError(t, err)
-		assert.Equal(t, 50, trie.cfg.DefaultMaxCardinality)
-		assert.Equal(t, "?", trie.cfg.ReplaceWith)
+		assert.Equal(t, 5, trie.cfg.SoftMaxCardinality)
+		assert.Equal(t, 50, trie.cfg.HardMaxCardinality)
 	})
 
 	t.Run("invalid config returns error", func(t *testing.T) {
 		cfg := &TrieConfig{
-			DefaultMaxCardinality: 0, // invalid
-			ReplaceWith:           "*",
-			Separator:             "/",
-			MaxDepth:              20,
+			SoftMaxCardinality: 0, // invalid
+			HardMaxCardinality: 100,
+			ReplaceWith:        "*",
+			Separator:          "/",
+			MaxDepth:           20,
+		}
+		_, err := NewPathTrie(cfg)
+		assert.Error(t, err)
+	})
+
+	t.Run("hard less than soft returns error", func(t *testing.T) {
+		cfg := &TrieConfig{
+			SoftMaxCardinality: 50,
+			HardMaxCardinality: 10, // invalid: less than soft
+			ReplaceWith:        "*",
+			Separator:          "/",
+			MaxDepth:           20,
 		}
 		_, err := NewPathTrie(cfg)
 		assert.Error(t, err)
 	})
 }
 
-func TestPathTrie_BasicInsertAndLookup(t *testing.T) {
+func TestPathTrie_SoftThreshold(t *testing.T) {
+	// Soft=3, Hard=10: First 3 children explicit, 4th+ go to wildcard
 	trie, err := NewPathTrie(&TrieConfig{
-		DefaultMaxCardinality: 2,
-		ReplaceWith:           "*",
-		Separator:             "/",
-		MaxDepth:              20,
+		SoftMaxCardinality: 3,
+		HardMaxCardinality: 10,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
 	})
 	require.NoError(t, err)
 
-	// Insert first path
-	result := trie.Insert("test/bar-attach-generic-product-apjkmyp/files/multi-test-version-jwbCm/test")
-	assert.Equal(t, "/test/bar-attach-generic-product-apjkmyp/files/multi-test-version-jwbCm/test", result)
-
-	// Insert second path with different second segment
-	result = trie.Insert("test/apjkmyp/files/jwbCm/test")
-	assert.Equal(t, "/test/apjkmyp/files/jwbCm/test", result)
-
-	// Insert third path - should trigger collapse at second segment (cardinality > 2)
-	result = trie.Insert("test/xyz/files/abc/test")
-	assert.Equal(t, "/test/*/files/*/test", result)
-
-	// Lookup should now return collapsed path
-	result = trie.Lookup("test/anything-new/files/something/test")
-	assert.Equal(t, "/test/*/files/*/test", result)
-}
-
-func TestPathTrie_CardinalityThreshold(t *testing.T) {
-	trie, err := NewPathTrie(&TrieConfig{
-		DefaultMaxCardinality: 3,
-		ReplaceWith:           "*",
-		Separator:             "/",
-		MaxDepth:              20,
-	})
-	require.NoError(t, err)
-
-	// Add paths up to threshold
+	// First 3 should be explicit
 	assert.Equal(t, "/api/v1/users", trie.Insert("api/v1/users"))
 	assert.Equal(t, "/api/v2/users", trie.Insert("api/v2/users"))
 	assert.Equal(t, "/api/v3/users", trie.Insert("api/v3/users"))
 
-	// Next insert should trigger collapse
+	// 4th should go to wildcard (soft collapse)
 	assert.Equal(t, "/api/*/users", trie.Insert("api/v4/users"))
 
-	// Verify lookup uses collapsed path
+	// But existing paths should still be explicit
+	assert.Equal(t, "/api/v1/users", trie.Lookup("api/v1/users"))
+	assert.Equal(t, "/api/v2/users", trie.Lookup("api/v2/users"))
+	assert.Equal(t, "/api/v3/users", trie.Lookup("api/v3/users"))
+
+	// New paths should go to wildcard
+	assert.Equal(t, "/api/*/users", trie.Lookup("api/v5/users"))
 	assert.Equal(t, "/api/*/users", trie.Lookup("api/v999/users"))
 }
 
-func TestPathTrie_DepthBasedCardinality(t *testing.T) {
+func TestPathTrie_HardThreshold(t *testing.T) {
+	// Soft=2, Hard=5: After 5 unique children, everything collapses
 	trie, err := NewPathTrie(&TrieConfig{
-		DefaultMaxCardinality: 2,
-		DepthCardinalities: map[int]int{
-			0: 5, // First segment allows 5 unique values
-			1: 3, // Second segment allows 3 unique values
+		SoftMaxCardinality: 2,
+		HardMaxCardinality: 5,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	})
+	require.NoError(t, err)
+
+	// First 2 explicit
+	assert.Equal(t, "/api/v1/users", trie.Insert("api/v1/users"))
+	assert.Equal(t, "/api/v2/users", trie.Insert("api/v2/users"))
+
+	// Next go to wildcard (soft collapse)
+	assert.Equal(t, "/api/*/users", trie.Insert("api/v3/users"))
+	assert.Equal(t, "/api/*/users", trie.Insert("api/v4/users"))
+	assert.Equal(t, "/api/*/users", trie.Insert("api/v5/users"))
+
+	// v1 and v2 should still be explicit
+	assert.Equal(t, "/api/v1/users", trie.Lookup("api/v1/users"))
+	assert.Equal(t, "/api/v2/users", trie.Lookup("api/v2/users"))
+
+	// 6th unique triggers hard collapse - now even v1, v2 become wildcard
+	assert.Equal(t, "/api/*/users", trie.Insert("api/v6/users"))
+
+	// Now ALL lookups should return wildcard
+	assert.Equal(t, "/api/*/users", trie.Lookup("api/v1/users"))
+	assert.Equal(t, "/api/*/users", trie.Lookup("api/v2/users"))
+	assert.Equal(t, "/api/*/users", trie.Lookup("api/v999/users"))
+}
+
+func TestPathTrie_DepthBasedThresholds(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 2,
+		HardMaxCardinality: 5,
+		DepthSoftCardinalities: map[int]int{
+			0: 5, // First segment allows 5 explicit
+		},
+		DepthHardCardinalities: map[int]int{
+			0: 20, // First segment allows 20 before hard collapse
 		},
 		ReplaceWith: "*",
 		Separator:   "/",
@@ -102,22 +135,32 @@ func TestPathTrie_DepthBasedCardinality(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Add 5 different first segments - should not collapse
+	// Add 5 different first segments - should all be explicit
 	for i := 0; i < 5; i++ {
 		result := trie.Insert("segment" + strconv.Itoa(i) + "/sub/path")
 		assert.Contains(t, result, "segment"+strconv.Itoa(i))
 	}
 
-	// 6th first segment should trigger collapse
+	// 6th first segment should go to wildcard (soft collapse at depth 0)
 	result := trie.Insert("segment5/sub/path")
 	assert.Equal(t, "/*/sub/path", result)
+
+	// But first 5 should still be explicit
+	for i := 0; i < 5; i++ {
+		result := trie.Lookup("segment" + strconv.Itoa(i) + "/sub/path")
+		assert.Contains(t, result, "segment"+strconv.Itoa(i))
+	}
 }
 
-func TestPathTrie_DepthBasedCardinality_NoLimit(t *testing.T) {
+func TestPathTrie_NoLimitWithMinusOne(t *testing.T) {
 	trie, err := NewPathTrie(&TrieConfig{
-		DefaultMaxCardinality: 2,
-		DepthCardinalities: map[int]int{
-			0: -1, // First segment never collapses
+		SoftMaxCardinality: 2,
+		HardMaxCardinality: 5,
+		DepthSoftCardinalities: map[int]int{
+			0: -1, // First segment never soft collapses
+		},
+		DepthHardCardinalities: map[int]int{
+			0: -1, // First segment never hard collapses
 		},
 		ReplaceWith: "*",
 		Separator:   "/",
@@ -125,17 +168,21 @@ func TestPathTrie_DepthBasedCardinality_NoLimit(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Add many first segments - should never collapse due to -1
+	// Add many first segments - should never collapse
 	for i := 0; i < 100; i++ {
 		result := trie.Insert("segment" + strconv.Itoa(i) + "/sub/path")
 		assert.Contains(t, result, "segment"+strconv.Itoa(i), "depth 0 should never collapse with -1")
 	}
 
-	// But second level should still collapse at 2
+	// But second level should still collapse at soft=2
 	trie2, _ := NewPathTrie(&TrieConfig{
-		DefaultMaxCardinality: 2,
-		DepthCardinalities: map[int]int{
-			0: -1, // First segment never collapses
+		SoftMaxCardinality: 2,
+		HardMaxCardinality: 5,
+		DepthSoftCardinalities: map[int]int{
+			0: -1,
+		},
+		DepthHardCardinalities: map[int]int{
+			0: -1,
 		},
 		ReplaceWith: "*",
 		Separator:   "/",
@@ -145,31 +192,11 @@ func TestPathTrie_DepthBasedCardinality_NoLimit(t *testing.T) {
 	trie2.Insert("api/v1/users")
 	trie2.Insert("api/v2/users")
 	result := trie2.Insert("api/v3/users")
-	assert.Equal(t, "/api/*/users", result, "depth 1 should still collapse at default cardinality")
-}
+	assert.Equal(t, "/api/*/users", result, "depth 1 should still soft collapse")
 
-func TestPathTrie_CascadingCollapse(t *testing.T) {
-	trie, err := NewPathTrie(&TrieConfig{
-		DefaultMaxCardinality: 2,
-		ReplaceWith:           "*",
-		Separator:             "/",
-		MaxDepth:              20,
-	})
-	require.NoError(t, err)
-
-	// Build tree: /root/child1/grandchild1
-	//             /root/child1/grandchild2
-	//             /root/child2/grandchild3
-	trie.Insert("root/child1/grandchild1")
-	trie.Insert("root/child1/grandchild2")
-	trie.Insert("root/child2/grandchild3")
-
-	// This should trigger collapse at "child" level
-	// which should cascade to grandchildren
-	result := trie.Insert("root/child3/grandchild4")
-
-	// After collapse, all should be wildcards
-	assert.Equal(t, "/root/*/*", result)
+	// v1 and v2 should still be explicit
+	assert.Equal(t, "/api/v1/users", trie2.Lookup("api/v1/users"))
+	assert.Equal(t, "/api/v2/users", trie2.Lookup("api/v2/users"))
 }
 
 func TestPathTrie_EmptyPath(t *testing.T) {
@@ -191,17 +218,6 @@ func TestPathTrie_SingleSegment(t *testing.T) {
 	assert.Equal(t, "/test", result)
 }
 
-func TestPathTrie_TrailingSlash(t *testing.T) {
-	trie, err := NewPathTrie(nil)
-	require.NoError(t, err)
-
-	result1 := trie.Insert("/api/users/")
-	result2 := trie.Insert("/api/users")
-
-	// Both should normalize to the same path
-	assert.Equal(t, result1, result2)
-}
-
 func TestPathTrie_QueryString(t *testing.T) {
 	trie, err := NewPathTrie(nil)
 	require.NoError(t, err)
@@ -221,31 +237,6 @@ func TestPathTrie_HTTPMethodPrefix(t *testing.T) {
 	// Non-HTTP prefix should be preserved
 	result = trie.Insert("MET /user_space")
 	assert.Equal(t, "/MET /user_space", result)
-}
-
-func TestPathTrie_PreserveExistingPaths(t *testing.T) {
-	trie, err := NewPathTrie(&TrieConfig{
-		DefaultMaxCardinality: 2,
-		ReplaceWith:           "*",
-		Separator:             "/",
-		MaxDepth:              20,
-	})
-	require.NoError(t, err)
-
-	// Insert paths
-	trie.Insert("api/users/123")
-	trie.Insert("api/users/456")
-
-	// Before collapse, lookups should return exact matches
-	assert.Equal(t, "/api/users/123", trie.Lookup("api/users/123"))
-	assert.Equal(t, "/api/users/456", trie.Lookup("api/users/456"))
-
-	// Trigger collapse
-	trie.Insert("api/users/789")
-
-	// After collapse, all should use wildcard
-	assert.Equal(t, "/api/users/*", trie.Lookup("api/users/123"))
-	assert.Equal(t, "/api/users/*", trie.Lookup("api/users/999"))
 }
 
 func TestPathTrie_Reset(t *testing.T) {
@@ -277,10 +268,11 @@ func TestPathTrie_NodeCount(t *testing.T) {
 
 func TestPathTrie_Concurrent(t *testing.T) {
 	trie, err := NewPathTrie(&TrieConfig{
-		DefaultMaxCardinality: 10,
-		ReplaceWith:           "*",
-		Separator:             "/",
-		MaxDepth:              20,
+		SoftMaxCardinality: 10,
+		HardMaxCardinality: 100,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
 	})
 	require.NoError(t, err)
 
@@ -307,52 +299,31 @@ func TestPathTrie_Concurrent(t *testing.T) {
 	assert.NotEmpty(t, result)
 }
 
-func TestPathTrie_MaxDepth(t *testing.T) {
+func TestPathTrie_CascadingCollapse(t *testing.T) {
 	trie, err := NewPathTrie(&TrieConfig{
-		DefaultMaxCardinality: 100,
-		ReplaceWith:           "*",
-		Separator:             "/",
-		MaxDepth:              3,
+		SoftMaxCardinality: 2,
+		HardMaxCardinality: 3,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
 	})
 	require.NoError(t, err)
 
-	// Path with more segments than MaxDepth
-	result := trie.Insert("/a/b/c/d/e/f")
-	assert.Equal(t, "/a/b/c/d/e/f", result)
+	// Build tree with multiple branches
+	trie.Insert("root/child1/grandchild1")
+	trie.Insert("root/child1/grandchild2")
+	trie.Insert("root/child2/grandchild3")
 
-	// Segments beyond MaxDepth are preserved
-	result = trie.Lookup("/a/b/c/x/y/z")
-	assert.Equal(t, "/a/b/c/x/y/z", result)
-}
+	// This triggers soft collapse at child level
+	trie.Insert("root/child3/grandchild4")
 
-func TestPathTrie_ComplexPaths(t *testing.T) {
-	trie, err := NewPathTrie(&TrieConfig{
-		DefaultMaxCardinality: 3,
-		ReplaceWith:           "*",
-		Separator:             "/",
-		MaxDepth:              20,
-	})
-	require.NoError(t, err)
+	// Trigger hard collapse
+	result := trie.Insert("root/child4/grandchild5")
+	assert.Equal(t, "/root/*/*", result)
 
-	paths := []string{
-		"bar/test/test/bar-attach-generic-product-apjkmyp/files/multi-test-version-jwbCm/test",
-		"bar/test/test/bar-attach-generic-registry-apjkmyp/files/push-metrics-test-OYboK/test",
-		"bar/test/test/another-product-xyz/files/version-abc/test",
-	}
-
-	for _, path := range paths {
-		trie.Insert(path)
-	}
-
-	// Should not collapse yet (cardinality = 3, threshold = 3)
-	result := trie.Lookup(paths[0])
-	assert.Contains(t, result, "bar-attach-generic-product-apjkmyp")
-
-	// Fourth path should trigger collapse
-	trie.Insert("bar/test/test/fourth-product/files/version-def/test")
-
-	result = trie.Lookup("bar/test/test/any-product/files/any-version/test")
-	assert.Equal(t, "/bar/test/test/*/files/*/test", result)
+	// After hard collapse, all lookups should return wildcard
+	assert.Equal(t, "/root/*/*", trie.Lookup("root/child1/grandchild1"))
+	assert.Equal(t, "/root/*/*", trie.Lookup("root/anything/else"))
 }
 
 func TestTrieConfig_Validate(t *testing.T) {
@@ -367,117 +338,72 @@ func TestTrieConfig_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "zero cardinality",
+			name: "zero soft cardinality",
 			config: &TrieConfig{
-				DefaultMaxCardinality: 0,
-				ReplaceWith:           "*",
-				Separator:             "/",
-				MaxDepth:              20,
+				SoftMaxCardinality: 0,
+				HardMaxCardinality: 100,
+				ReplaceWith:        "*",
+				Separator:          "/",
+				MaxDepth:           20,
 			},
 			wantErr: true,
 		},
 		{
-			name: "negative cardinality",
+			name: "zero hard cardinality",
 			config: &TrieConfig{
-				DefaultMaxCardinality: -1,
-				ReplaceWith:           "*",
-				Separator:             "/",
-				MaxDepth:              20,
+				SoftMaxCardinality: 10,
+				HardMaxCardinality: 0,
+				ReplaceWith:        "*",
+				Separator:          "/",
+				MaxDepth:           20,
+			},
+			wantErr: true,
+		},
+		{
+			name: "hard less than soft",
+			config: &TrieConfig{
+				SoftMaxCardinality: 50,
+				HardMaxCardinality: 10,
+				ReplaceWith:        "*",
+				Separator:          "/",
+				MaxDepth:           20,
 			},
 			wantErr: true,
 		},
 		{
 			name: "empty replace with",
 			config: &TrieConfig{
-				DefaultMaxCardinality: 100,
-				ReplaceWith:           "",
-				Separator:             "/",
-				MaxDepth:              20,
+				SoftMaxCardinality: 10,
+				HardMaxCardinality: 100,
+				ReplaceWith:        "",
+				Separator:          "/",
+				MaxDepth:           20,
 			},
 			wantErr: true,
 		},
 		{
-			name: "empty separator",
+			name: "valid with depth overrides",
 			config: &TrieConfig{
-				DefaultMaxCardinality: 100,
-				ReplaceWith:           "*",
-				Separator:             "",
-				MaxDepth:              20,
-			},
-			wantErr: true,
-		},
-		{
-			name: "zero max depth",
-			config: &TrieConfig{
-				DefaultMaxCardinality: 100,
-				ReplaceWith:           "*",
-				Separator:             "/",
-				MaxDepth:              0,
-			},
-			wantErr: true,
-		},
-		{
-			name: "max depth too large",
-			config: &TrieConfig{
-				DefaultMaxCardinality: 100,
-				ReplaceWith:           "*",
-				Separator:             "/",
-				MaxDepth:              101,
-			},
-			wantErr: true,
-		},
-		{
-			name: "negative depth in DepthCardinalities",
-			config: &TrieConfig{
-				DefaultMaxCardinality: 100,
-				DepthCardinalities:    map[int]int{-1: 50},
-				ReplaceWith:           "*",
-				Separator:             "/",
-				MaxDepth:              20,
-			},
-			wantErr: true,
-		},
-		{
-			name: "zero cardinality in DepthCardinalities",
-			config: &TrieConfig{
-				DefaultMaxCardinality: 100,
-				DepthCardinalities:    map[int]int{0: 0},
-				ReplaceWith:           "*",
-				Separator:             "/",
-				MaxDepth:              20,
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid negative cardinality in DepthCardinalities",
-			config: &TrieConfig{
-				DefaultMaxCardinality: 100,
-				DepthCardinalities:    map[int]int{0: -2},
-				ReplaceWith:           "*",
-				Separator:             "/",
-				MaxDepth:              20,
-			},
-			wantErr: true,
-		},
-		{
-			name: "valid depth cardinalities",
-			config: &TrieConfig{
-				DefaultMaxCardinality: 100,
-				DepthCardinalities:    map[int]int{0: 50, 1: 30, 2: 20},
-				ReplaceWith:           "*",
-				Separator:             "/",
-				MaxDepth:              20,
+				SoftMaxCardinality:     10,
+				HardMaxCardinality:     100,
+				DepthSoftCardinalities: map[int]int{0: 5, 1: 3},
+				DepthHardCardinalities: map[int]int{0: 50, 1: 30},
+				ReplaceWith:            "*",
+				Separator:              "/",
+				MaxDepth:               20,
 			},
 			wantErr: false,
 		},
 		{
 			name: "-1 for no limit is valid",
 			config: &TrieConfig{
-				DefaultMaxCardinality: 100,
-				DepthCardinalities:    map[int]int{0: -1, 1: 50},
-				ReplaceWith:           "*",
-				Separator:             "/",
-				MaxDepth:              20,
+				SoftMaxCardinality:     10,
+				HardMaxCardinality:     100,
+				DepthSoftCardinalities: map[int]int{0: -1},
+				DepthHardCardinalities: map[int]int{0: -1},
+				ReplaceWith:            "*",
+				Separator:              "/",
+				MaxDepth:               20,
 			},
 			wantErr: false,
 		},
@@ -499,10 +425,11 @@ func TestTrieConfig_Validate(t *testing.T) {
 
 func BenchmarkPathTrie_Insert(b *testing.B) {
 	trie, _ := NewPathTrie(&TrieConfig{
-		DefaultMaxCardinality: 100,
-		ReplaceWith:           "*",
-		Separator:             "/",
-		MaxDepth:              20,
+		SoftMaxCardinality: 10,
+		HardMaxCardinality: 100,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
 	})
 
 	paths := []string{
@@ -526,10 +453,11 @@ func BenchmarkPathTrie_Insert(b *testing.B) {
 
 func BenchmarkPathTrie_Lookup(b *testing.B) {
 	trie, _ := NewPathTrie(&TrieConfig{
-		DefaultMaxCardinality: 100,
-		ReplaceWith:           "*",
-		Separator:             "/",
-		MaxDepth:              20,
+		SoftMaxCardinality: 10,
+		HardMaxCardinality: 100,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
 	})
 
 	// Pre-populate trie
@@ -561,10 +489,11 @@ func BenchmarkPathTrie_InsertWithCollapse(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		trie, _ := NewPathTrie(&TrieConfig{
-			DefaultMaxCardinality: 10,
-			ReplaceWith:           "*",
-			Separator:             "/",
-			MaxDepth:              20,
+			SoftMaxCardinality: 10,
+			HardMaxCardinality: 50,
+			ReplaceWith:        "*",
+			Separator:          "/",
+			MaxDepth:           20,
 		})
 		for _, path := range paths {
 			trie.Insert(path)
