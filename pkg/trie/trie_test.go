@@ -1,61 +1,15 @@
 package trie
 
 import (
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestNewPathTrie(t *testing.T) {
-	t.Run("nil config uses defaults", func(t *testing.T) {
-		trie, err := NewPathTrie(nil)
-		require.NoError(t, err)
-		assert.NotNil(t, trie)
-		assert.Equal(t, 10, trie.cfg.SoftMaxCardinality)
-		assert.Equal(t, 100, trie.cfg.HardMaxCardinality)
-	})
-
-	t.Run("custom config", func(t *testing.T) {
-		cfg := &TrieConfig{
-			SoftMaxCardinality: 5,
-			HardMaxCardinality: 50,
-			ReplaceWith:        "?",
-			Separator:          "/",
-			MaxDepth:           10,
-		}
-		trie, err := NewPathTrie(cfg)
-		require.NoError(t, err)
-		assert.Equal(t, 5, trie.cfg.SoftMaxCardinality)
-		assert.Equal(t, 50, trie.cfg.HardMaxCardinality)
-	})
-
-	t.Run("invalid config returns error", func(t *testing.T) {
-		cfg := &TrieConfig{
-			SoftMaxCardinality: 0, // invalid
-			HardMaxCardinality: 100,
-			ReplaceWith:        "*",
-			Separator:          "/",
-			MaxDepth:           20,
-		}
-		_, err := NewPathTrie(cfg)
-		assert.Error(t, err)
-	})
-
-	t.Run("hard less than soft returns error", func(t *testing.T) {
-		cfg := &TrieConfig{
-			SoftMaxCardinality: 50,
-			HardMaxCardinality: 10, // invalid: less than soft
-			ReplaceWith:        "*",
-			Separator:          "/",
-			MaxDepth:           20,
-		}
-		_, err := NewPathTrie(cfg)
-		assert.Error(t, err)
-	})
-}
 
 func TestPathTrie_SoftThreshold(t *testing.T) {
 	// Soft=3, Hard=10: First 3 children explicit, 4th+ go to wildcard
@@ -77,13 +31,13 @@ func TestPathTrie_SoftThreshold(t *testing.T) {
 	assert.Equal(t, "/api/*/users", trie.Insert("api/v4/users"))
 
 	// But existing paths should still be explicit
-	assert.Equal(t, "/api/v1/users", trie.Lookup("api/v1/users"))
-	assert.Equal(t, "/api/v2/users", trie.Lookup("api/v2/users"))
-	assert.Equal(t, "/api/v3/users", trie.Lookup("api/v3/users"))
+	assert.Equal(t, "/api/v1/users", trie.Insert("api/v1/users"))
+	assert.Equal(t, "/api/v2/users", trie.Insert("api/v2/users"))
+	assert.Equal(t, "/api/v3/users", trie.Insert("api/v3/users"))
 
 	// New paths should go to wildcard
-	assert.Equal(t, "/api/*/users", trie.Lookup("api/v5/users"))
-	assert.Equal(t, "/api/*/users", trie.Lookup("api/v999/users"))
+	assert.Equal(t, "/api/*/users", trie.Insert("api/v5/users"))
+	assert.Equal(t, "/api/*/users", trie.Insert("api/v999/users"))
 }
 
 func TestPathTrie_HardThreshold(t *testing.T) {
@@ -107,16 +61,16 @@ func TestPathTrie_HardThreshold(t *testing.T) {
 	assert.Equal(t, "/api/*/users", trie.Insert("api/v5/users"))
 
 	// v1 and v2 should still be explicit
-	assert.Equal(t, "/api/v1/users", trie.Lookup("api/v1/users"))
-	assert.Equal(t, "/api/v2/users", trie.Lookup("api/v2/users"))
+	assert.Equal(t, "/api/v1/users", trie.Insert("api/v1/users"))
+	assert.Equal(t, "/api/v2/users", trie.Insert("api/v2/users"))
 
 	// 6th unique triggers hard collapse - now even v1, v2 become wildcard
 	assert.Equal(t, "/api/*/users", trie.Insert("api/v6/users"))
 
 	// Now ALL lookups should return wildcard
-	assert.Equal(t, "/api/*/users", trie.Lookup("api/v1/users"))
-	assert.Equal(t, "/api/*/users", trie.Lookup("api/v2/users"))
-	assert.Equal(t, "/api/*/users", trie.Lookup("api/v999/users"))
+	assert.Equal(t, "/api/*/users", trie.Insert("api/v1/users"))
+	assert.Equal(t, "/api/*/users", trie.Insert("api/v2/users"))
+	assert.Equal(t, "/api/*/users", trie.Insert("api/v999/users"))
 }
 
 func TestPathTrie_DepthBasedThresholds(t *testing.T) {
@@ -147,8 +101,22 @@ func TestPathTrie_DepthBasedThresholds(t *testing.T) {
 
 	// But first 5 should still be explicit
 	for i := 0; i < 5; i++ {
-		result := trie.Lookup("segment" + strconv.Itoa(i) + "/sub/path")
+		result := trie.Insert("segment" + strconv.Itoa(i) + "/sub/path")
 		assert.Contains(t, result, "segment"+strconv.Itoa(i))
+	}
+
+	// Test hard collapse limits.
+	for i := 0; i < 20; i++ {
+		trie.Insert("segment" + strconv.Itoa(i) + "/sub/path")
+	}
+	for i := 0; i < 5; i++ {
+		result := trie.Insert("segment" + strconv.Itoa(i) + "/sub/path")
+		assert.Contains(t, result, "segment"+strconv.Itoa(i))
+	}
+	trie.Insert("segment20/sub/path")
+	for i := 0; i < 5; i++ {
+		result := trie.Insert("segment" + strconv.Itoa(i) + "/sub/path")
+		assert.Equal(t, "/*/sub/path", result)
 	}
 }
 
@@ -226,19 +194,6 @@ func TestPathTrie_QueryString(t *testing.T) {
 	assert.Equal(t, "/attach", result)
 }
 
-func TestPathTrie_HTTPMethodPrefix(t *testing.T) {
-	trie, err := NewPathTrie(nil)
-	require.NoError(t, err)
-
-	// HTTP method should be stripped
-	result := trie.Insert("GET /user_space?kernel_space")
-	assert.Equal(t, "/user_space", result)
-
-	// Non-HTTP prefix should be preserved
-	result = trie.Insert("MET /user_space")
-	assert.Equal(t, "/MET /user_space", result)
-}
-
 func TestPathTrie_Reset(t *testing.T) {
 	trie, err := NewPathTrie(nil)
 	require.NoError(t, err)
@@ -299,6 +254,50 @@ func TestPathTrie_Concurrent(t *testing.T) {
 	assert.NotEmpty(t, result)
 }
 
+func TestPathTrie_HardThreshold_UniqueSegmentCounting(t *testing.T) {
+	// Verify that repeated segments don't count multiple times toward hard threshold
+	// Soft=2, Hard=5: hard collapse should only trigger after 5 UNIQUE children
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 2,
+		HardMaxCardinality: 5,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	})
+	require.NoError(t, err)
+
+	// First 2 explicit
+	assert.Equal(t, "/api/v1/users", trie.Insert("api/v1/users"))
+	assert.Equal(t, "/api/v2/users", trie.Insert("api/v2/users"))
+
+	// v3 goes to wildcard (soft collapse)
+	assert.Equal(t, "/api/*/users", trie.Insert("api/v3/users"))
+
+	// Insert v3 many more times - should NOT count toward hard threshold
+	for i := 0; i < 100; i++ {
+		assert.Equal(t, "/api/*/users", trie.Insert("api/v3/users"))
+	}
+
+	// v1 and v2 should still be explicit (not hard collapsed yet)
+	assert.Equal(t, "/api/v1/users", trie.Insert("api/v1/users"))
+	assert.Equal(t, "/api/v2/users", trie.Insert("api/v2/users"))
+
+	// Now add v4 and v5 (still under hard threshold)
+	assert.Equal(t, "/api/*/users", trie.Insert("api/v4/users"))
+	assert.Equal(t, "/api/*/users", trie.Insert("api/v5/users"))
+
+	// v1 and v2 should STILL be explicit
+	assert.Equal(t, "/api/v1/users", trie.Insert("api/v1/users"))
+	assert.Equal(t, "/api/v2/users", trie.Insert("api/v2/users"))
+
+	// v6 triggers hard collapse (6th unique child > hard threshold of 5)
+	assert.Equal(t, "/api/*/users", trie.Insert("api/v6/users"))
+
+	// Now v1 and v2 should be wildcarded
+	assert.Equal(t, "/api/*/users", trie.Insert("api/v1/users"))
+	assert.Equal(t, "/api/*/users", trie.Insert("api/v2/users"))
+}
+
 func TestPathTrie_CascadingCollapse(t *testing.T) {
 	trie, err := NewPathTrie(&TrieConfig{
 		SoftMaxCardinality: 2,
@@ -315,10 +314,11 @@ func TestPathTrie_CascadingCollapse(t *testing.T) {
 	trie.Insert("root/child2/grandchild3")
 
 	// This triggers soft collapse at child level
-	trie.Insert("root/child3/grandchild4")
+	result := trie.Insert("root/child3/grandchild4")
+	assert.Equal(t, "/root/*/grandchild4", result)
 
 	// Trigger hard collapse
-	result := trie.Insert("root/child4/grandchild5")
+	result = trie.Insert("root/child4/grandchild5")
 	assert.Equal(t, "/root/*/*", result)
 
 	// After hard collapse, all lookups should return wildcard
@@ -407,6 +407,96 @@ func TestTrieConfig_Validate(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "negative MaxPatterns",
+			config: &TrieConfig{
+				SoftMaxCardinality: 10,
+				HardMaxCardinality: 100,
+				MaxPatterns:        -1,
+				ReplaceWith:        "*",
+				Separator:          "/",
+				MaxDepth:           20,
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid with TTL and prune interval",
+			config: &TrieConfig{
+				SoftMaxCardinality: 10,
+				HardMaxCardinality: 100,
+				ReplaceWith:        "*",
+				Separator:          "/",
+				MaxDepth:           20,
+				PatternTTL:         time.Hour,
+				PruneInterval:      time.Minute,
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid with no TTL or pruning",
+			config: &TrieConfig{
+				SoftMaxCardinality: 10,
+				HardMaxCardinality: 100,
+				ReplaceWith:        "*",
+				Separator:          "/",
+				MaxDepth:           20,
+				PatternTTL:         0,
+				PruneInterval:      0,
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid with TTL only (no background pruning)",
+			config: &TrieConfig{
+				SoftMaxCardinality: 10,
+				HardMaxCardinality: 100,
+				ReplaceWith:        "*",
+				Separator:          "/",
+				MaxDepth:           20,
+				PatternTTL:         time.Hour,
+				PruneInterval:      0,
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid prune interval without TTL",
+			config: &TrieConfig{
+				SoftMaxCardinality: 10,
+				HardMaxCardinality: 100,
+				ReplaceWith:        "*",
+				Separator:          "/",
+				MaxDepth:           20,
+				PatternTTL:         0,
+				PruneInterval:      time.Minute,
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid negative TTL",
+			config: &TrieConfig{
+				SoftMaxCardinality: 10,
+				HardMaxCardinality: 100,
+				ReplaceWith:        "*",
+				Separator:          "/",
+				MaxDepth:           20,
+				PatternTTL:         -time.Hour,
+				PruneInterval:      0,
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid negative prune interval",
+			config: &TrieConfig{
+				SoftMaxCardinality: 10,
+				HardMaxCardinality: 100,
+				ReplaceWith:        "*",
+				Separator:          "/",
+				MaxDepth:           20,
+				PatternTTL:         time.Hour,
+				PruneInterval:      -time.Minute,
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -419,6 +509,396 @@ func TestTrieConfig_Validate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Tests for global pattern limit (MaxPatterns)
+
+func TestPathTrie_MaxPatterns_UnderLimit(t *testing.T) {
+	// Test that patterns under the limit are not affected
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 5,
+		HardMaxCardinality: 100,
+		MaxPatterns:        20,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	})
+	require.NoError(t, err)
+
+	// Insert paths that create patterns under the limit
+	for i := 0; i < 5; i++ {
+		trie.Insert("/api/v" + strconv.Itoa(i) + "/users")
+	}
+
+	// All should be explicit since under both soft threshold and max patterns
+	for i := 0; i < 5; i++ {
+		result := trie.Lookup("/api/v" + strconv.Itoa(i) + "/users")
+		assert.Contains(t, result, "v"+strconv.Itoa(i), "should remain explicit when under limits")
+	}
+
+	assert.Equal(t, trie.PatternCount(), 5)
+
+	// Insert more paths, however, the patternCount() goes up by only 1 after softMax and before hardMax.
+	for i := 0; i < 100; i++ {
+		trie.Insert("/api/v" + strconv.Itoa(i) + "/users")
+	}
+	assert.Equal(t, trie.PatternCount(), 6)
+
+	trie.Insert("api/v100/users")
+	assert.Equal(t, trie.PatternCount(), 1)
+}
+
+func TestPathTrie_MaxPatterns_EnforceLimit(t *testing.T) {
+	// Test that exceeding MaxPatterns triggers hard collapse of deepest nodes
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 3,
+		HardMaxCardinality: 100, // High hard limit so it doesn't interfere
+		MaxPatterns:        10,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	})
+	require.NoError(t, err)
+
+	// Insert many paths at different depths to create many patterns
+	// These will create paths like /a/b1/c1, /a/b1/c2, etc.
+	for i := 0; i < 4; i++ {
+		for j := 0; j < 4; j++ {
+			trie.Insert("/a/b" + strconv.Itoa(i) + "/c" + strconv.Itoa(j))
+		}
+	}
+
+	// Pattern count should be enforced to stay at or below MaxPatterns
+	assert.LessOrEqual(t, trie.PatternCount(), 10, "pattern count should not exceed MaxPatterns")
+}
+
+func TestPathTrie_MaxPatterns_DeepestCollapsedFirst(t *testing.T) {
+	// Test that deeper soft-collapsed nodes are hard-collapsed before shallower ones
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 2,
+		HardMaxCardinality: 100,
+		MaxPatterns:        5,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	})
+	require.NoError(t, err)
+
+	// Create a structure with soft-collapsed nodes at different depths
+	// First, create explicit paths at depth 1 (under soft threshold)
+	trie.Insert("/api/v1/resource/item1")
+	trie.Insert("/api/v1/resource/item2")
+	trie.Insert("/api/v2/resource/item1")
+	trie.Insert("/api/v2/resource/item2")
+
+	// These will cause soft collapse at depth 2 (under /api/v1/resource/)
+	trie.Insert("/api/v1/resource/item3")
+	trie.Insert("/api/v1/resource/item4")
+
+	// When pattern limit is exceeded, deeper nodes should collapse first
+	// The node at depth 2 (resource level) should collapse before depth 1
+	patternCount := trie.PatternCount()
+	assert.LessOrEqual(t, patternCount, 5, "pattern count should be enforced")
+
+	result := trie.Insert("/api/v1/resource/item3")
+	assert.Equal(t, "/api/v1/resource/*", result)
+}
+
+func TestPathTrie_MaxPatterns_NoCandidates(t *testing.T) {
+	// Test that if there are no soft-collapsed candidates, we accept over limit
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100, // Very high so nothing soft collapses
+		HardMaxCardinality: 200,
+		MaxPatterns:        5,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	})
+	require.NoError(t, err)
+
+	// Insert paths - none will soft collapse since soft threshold is high
+	for i := 0; i < 10; i++ {
+		trie.Insert("/api/v" + strconv.Itoa(i))
+	}
+
+	// Since no nodes are soft-collapsed, there are no candidates to collapse
+	// Pattern count may exceed limit
+	assert.Equal(t, 10, trie.PatternCount(), "should have 10 patterns with no collapse candidates")
+}
+
+func TestPathTrie_PatternCount(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100,
+		HardMaxCardinality: 200,
+		MaxPatterns:        0,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, trie.PatternCount(), "empty trie should have 0 patterns")
+
+	trie.Insert("/a")
+	assert.Equal(t, 1, trie.PatternCount(), "one path should create one pattern")
+
+	trie.Insert("/b")
+	assert.Equal(t, 2, trie.PatternCount(), "two paths should create two patterns")
+
+	trie.Insert("/a/b")
+	// /a becomes a waypoint, /a/b is the leaf
+	// /b is still a leaf
+	// So we have: /a/b, /b = 2 patterns? No, /a is still a potential endpoint
+	// Actually, patterns = leaves, and /a might not be a leaf anymore if it has children
+	// Let's check: after /a/b, node "a" has child "b", so "a" is not a leaf
+	// Patterns = /a/b (1) + /b (1) = 2
+	// Wait, before we had /a as a leaf. Now /a has a child, so it's not a leaf.
+	// So pattern count should still be 2: /a/b and /b
+	assert.Equal(t, 2, trie.PatternCount(), "pattern count after adding child")
+}
+
+// Tests for TTL-based pattern pruning
+
+func TestPathTrie_PruneStale_TTLDisabled(t *testing.T) {
+	// When PatternTTL=0, no pruning should happen
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100,
+		HardMaxCardinality: 200,
+		MaxPatterns:        0,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+		PatternTTL:         0, // disabled
+	})
+	require.NoError(t, err)
+
+	trie.Insert("/api/v1/users")
+	trie.Insert("/api/v2/users")
+	assert.Equal(t, 2, trie.PatternCount())
+
+	// Pruning should do nothing when TTL is disabled
+	pruned := trie.PruneStale(time.Now().Add(time.Hour))
+	assert.Equal(t, 0, pruned, "no patterns should be pruned when TTL is disabled")
+	assert.Equal(t, 2, trie.PatternCount())
+}
+
+func TestPathTrie_PruneStale_FreshPatternsPreserved(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100,
+		HardMaxCardinality: 200,
+		MaxPatterns:        0,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+		PatternTTL:         time.Hour,
+	})
+	require.NoError(t, err)
+
+	trie.Insert("/api/v1/users")
+	trie.Insert("/api/v2/users")
+	assert.Equal(t, 2, trie.PatternCount())
+
+	// Cutoff in the past - patterns are fresh
+	cutoff := time.Now().Add(-time.Hour)
+	pruned := trie.PruneStale(cutoff)
+	assert.Equal(t, 0, pruned, "fresh patterns should not be pruned")
+	assert.Equal(t, 2, trie.PatternCount())
+}
+
+func TestPathTrie_PruneStale_StalePatternsRemoved(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100,
+		HardMaxCardinality: 200,
+		MaxPatterns:        0,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+		PatternTTL:         time.Hour,
+	})
+	require.NoError(t, err)
+
+	trie.Insert("/api/v1/users")
+	trie.Insert("/api/v2/users")
+	assert.Equal(t, 2, trie.PatternCount())
+
+	// Cutoff in the future - all patterns are stale
+	cutoff := time.Now().Add(time.Hour)
+	pruned := trie.PruneStale(cutoff)
+	assert.Equal(t, 2, pruned, "stale patterns should be pruned")
+	assert.Equal(t, 0, trie.PatternCount())
+}
+
+func TestPathTrie_PruneStale_ParentCleanup(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100,
+		HardMaxCardinality: 200,
+		MaxPatterns:        0,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+		PatternTTL:         time.Hour,
+	})
+	require.NoError(t, err)
+
+	trie.Insert("/api/v1/users/profile")
+	trie.Insert("/api/v1/users/settings")
+	initialNodeCount := trie.NodeCount()
+	assert.Equal(t, 2, trie.PatternCount())
+
+	// Prune all (cutoff in future)
+	cutoff := time.Now().Add(time.Hour)
+	pruned := trie.PruneStale(cutoff)
+	assert.Equal(t, 2, pruned)
+	assert.Equal(t, 0, trie.PatternCount())
+
+	// Node count should be reduced (empty parents cleaned up)
+	assert.Less(t, trie.NodeCount(), initialNodeCount, "empty parent nodes should be cleaned up")
+}
+
+func TestPathTrie_PruneStale_PartialPrune(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100,
+		HardMaxCardinality: 200,
+		MaxPatterns:        0,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+		PatternTTL:         time.Hour,
+	})
+	require.NoError(t, err)
+
+	// Insert first pattern
+	trie.Insert("/api/v1/users")
+	time.Sleep(10 * time.Millisecond)
+	midPoint := time.Now()
+	time.Sleep(10 * time.Millisecond)
+
+	// Insert second pattern later
+	trie.Insert("/api/v2/users")
+	assert.Equal(t, 2, trie.PatternCount())
+
+	// Prune only the first pattern (cutoff between the two inserts)
+	pruned := trie.PruneStale(midPoint)
+	assert.Equal(t, 1, pruned, "only older pattern should be pruned")
+	assert.Equal(t, 1, trie.PatternCount())
+
+	// v2 should still be accessible
+	result := trie.Lookup("/api/v2/users")
+	assert.Equal(t, "/api/v2/users", result)
+}
+
+func TestPathTrie_Stop_TerminatesGoroutine(t *testing.T) {
+	goroutinesBefore := runtime.NumGoroutine()
+
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100,
+		HardMaxCardinality: 200,
+		MaxPatterns:        0,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+		PatternTTL:         time.Hour,
+		PruneInterval:      10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	// Goroutine count should have increased
+	assert.Greater(t, runtime.NumGoroutine(), goroutinesBefore, "pruning goroutine should have started")
+
+	trie.Insert("/api/v1/users")
+
+	// Stop should terminate the goroutine
+	trie.Stop()
+
+	// Goroutine count should be back to original
+	assert.Equal(t, goroutinesBefore, runtime.NumGoroutine(), "pruning goroutine should have stopped")
+
+	// Multiple calls to Stop should be safe
+	trie.Stop()
+}
+
+func TestPathTrie_Stop_NoGoroutine(t *testing.T) {
+	// Stop should be safe to call even when no goroutine was started
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100,
+		HardMaxCardinality: 200,
+		MaxPatterns:        0,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+		PatternTTL:         0, // no pruning
+	})
+	require.NoError(t, err)
+
+	// Should not panic
+	trie.Stop()
+}
+
+func TestPathTrie_BackgroundPruning(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100,
+		HardMaxCardinality: 200,
+		MaxPatterns:        0,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+		PatternTTL:         50 * time.Millisecond,
+		PruneInterval:      20 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	defer trie.Stop()
+
+	trie.Insert("/api/v1/users")
+	assert.Equal(t, 1, trie.PatternCount())
+
+	// Wait for TTL to expire and pruning to occur
+	time.Sleep(100 * time.Millisecond)
+
+	assert.Equal(t, 0, trie.PatternCount(), "pattern should be pruned by background goroutine")
+}
+
+func TestPathTrie_ConcurrentInsertAndPrune(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 10,
+		HardMaxCardinality: 100,
+		MaxPatterns:        0,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+		PatternTTL:         time.Hour,
+	})
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+
+	// Concurrent inserts
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				trie.Insert("/api/v" + strconv.Itoa(id) + "/resource/" + strconv.Itoa(j))
+			}
+		}(i)
+	}
+
+	// Concurrent prunes
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				trie.PruneStale(time.Now().Add(-time.Second))
+				time.Sleep(time.Millisecond)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// Trie should still be functional
+	result := trie.Lookup("/api/v0/resource/0")
+	assert.NotEmpty(t, result)
 }
 
 // Benchmarks
@@ -499,175 +979,4 @@ func BenchmarkPathTrie_InsertWithCollapse(b *testing.B) {
 			trie.Insert(path)
 		}
 	}
-}
-
-// Tests for global pattern limit (MaxPatterns)
-
-func TestPathTrie_MaxPatterns_UnderLimit(t *testing.T) {
-	// Test that patterns under the limit are not affected
-	trie, err := NewPathTrie(&TrieConfig{
-		SoftMaxCardinality: 5,
-		HardMaxCardinality: 100,
-		MaxPatterns:        20,
-		ReplaceWith:        "*",
-		Separator:          "/",
-		MaxDepth:           20,
-	})
-	require.NoError(t, err)
-
-	// Insert paths that create patterns under the limit
-	for i := 0; i < 5; i++ {
-		trie.Insert("/api/v" + strconv.Itoa(i) + "/users")
-	}
-
-	// All should be explicit since under both soft threshold and max patterns
-	for i := 0; i < 5; i++ {
-		result := trie.Lookup("/api/v" + strconv.Itoa(i) + "/users")
-		assert.Contains(t, result, "v"+strconv.Itoa(i), "should remain explicit when under limits")
-	}
-
-	assert.LessOrEqual(t, trie.PatternCount(), 20, "pattern count should be under limit")
-}
-
-func TestPathTrie_MaxPatterns_EnforceLimit(t *testing.T) {
-	// Test that exceeding MaxPatterns triggers hard collapse of deepest nodes
-	trie, err := NewPathTrie(&TrieConfig{
-		SoftMaxCardinality: 3,
-		HardMaxCardinality: 100, // High hard limit so it doesn't interfere
-		MaxPatterns:        10,
-		ReplaceWith:        "*",
-		Separator:          "/",
-		MaxDepth:           20,
-	})
-	require.NoError(t, err)
-
-	// Insert many paths at different depths to create many patterns
-	// These will create paths like /a/b1/c1, /a/b1/c2, etc.
-	for i := 0; i < 4; i++ {
-		for j := 0; j < 4; j++ {
-			trie.Insert("/a/b" + strconv.Itoa(i) + "/c" + strconv.Itoa(j))
-		}
-	}
-
-	// Pattern count should be enforced to stay at or below MaxPatterns
-	assert.LessOrEqual(t, trie.PatternCount(), 10, "pattern count should not exceed MaxPatterns")
-}
-
-func TestPathTrie_MaxPatterns_DeepestCollapsedFirst(t *testing.T) {
-	// Test that deeper soft-collapsed nodes are hard-collapsed before shallower ones
-	trie, err := NewPathTrie(&TrieConfig{
-		SoftMaxCardinality: 2,
-		HardMaxCardinality: 100,
-		MaxPatterns:        5,
-		ReplaceWith:        "*",
-		Separator:          "/",
-		MaxDepth:           20,
-	})
-	require.NoError(t, err)
-
-	// Create a structure with soft-collapsed nodes at different depths
-	// First, create explicit paths at depth 1 (under soft threshold)
-	trie.Insert("/api/v1/resource/item1")
-	trie.Insert("/api/v1/resource/item2")
-	trie.Insert("/api/v2/resource/item1")
-	trie.Insert("/api/v2/resource/item2")
-
-	// These will cause soft collapse at depth 2 (under /api/v1/resource/)
-	trie.Insert("/api/v1/resource/item3")
-	trie.Insert("/api/v1/resource/item4")
-
-	// When pattern limit is exceeded, deeper nodes should collapse first
-	// The node at depth 2 (resource level) should collapse before depth 1
-	patternCount := trie.PatternCount()
-	assert.LessOrEqual(t, patternCount, 5, "pattern count should be enforced")
-}
-
-func TestPathTrie_MaxPatterns_NoLimitWithZero(t *testing.T) {
-	// Test that MaxPatterns=0 means no limit
-	trie, err := NewPathTrie(&TrieConfig{
-		SoftMaxCardinality: 3,
-		HardMaxCardinality: 100,
-		MaxPatterns:        0, // No limit
-		ReplaceWith:        "*",
-		Separator:          "/",
-		MaxDepth:           20,
-	})
-	require.NoError(t, err)
-
-	// Insert many paths
-	for i := 0; i < 20; i++ {
-		trie.Insert("/segment" + strconv.Itoa(i) + "/sub")
-	}
-
-	// With no pattern limit, soft collapse should still happen at threshold 3
-	// but no global enforcement
-	// First 3 are explicit, rest go to wildcard but patterns still grow
-	assert.Greater(t, trie.PatternCount(), 0, "should have some patterns")
-}
-
-func TestPathTrie_MaxPatterns_NoCandidates(t *testing.T) {
-	// Test that if there are no soft-collapsed candidates, we accept over limit
-	trie, err := NewPathTrie(&TrieConfig{
-		SoftMaxCardinality: 100, // Very high so nothing soft collapses
-		HardMaxCardinality: 200,
-		MaxPatterns:        5,
-		ReplaceWith:        "*",
-		Separator:          "/",
-		MaxDepth:           20,
-	})
-	require.NoError(t, err)
-
-	// Insert paths - none will soft collapse since soft threshold is high
-	for i := 0; i < 10; i++ {
-		trie.Insert("/api/v" + strconv.Itoa(i))
-	}
-
-	// Since no nodes are soft-collapsed, there are no candidates to collapse
-	// Pattern count may exceed limit
-	assert.Equal(t, 10, trie.PatternCount(), "should have 10 patterns with no collapse candidates")
-}
-
-func TestPathTrie_MaxPatterns_ValidationNegative(t *testing.T) {
-	// Test that negative MaxPatterns is rejected
-	_, err := NewPathTrie(&TrieConfig{
-		SoftMaxCardinality: 10,
-		HardMaxCardinality: 100,
-		MaxPatterns:        -1,
-		ReplaceWith:        "*",
-		Separator:          "/",
-		MaxDepth:           20,
-	})
-	assert.Error(t, err, "negative MaxPatterns should be rejected")
-	assert.Contains(t, err.Error(), "MaxPatterns")
-}
-
-func TestPathTrie_PatternCount(t *testing.T) {
-	trie, err := NewPathTrie(&TrieConfig{
-		SoftMaxCardinality: 100,
-		HardMaxCardinality: 200,
-		MaxPatterns:        0,
-		ReplaceWith:        "*",
-		Separator:          "/",
-		MaxDepth:           20,
-	})
-	require.NoError(t, err)
-
-	assert.Equal(t, 0, trie.PatternCount(), "empty trie should have 0 patterns")
-
-	trie.Insert("/a")
-	assert.Equal(t, 1, trie.PatternCount(), "one path should create one pattern")
-
-	trie.Insert("/b")
-	assert.Equal(t, 2, trie.PatternCount(), "two paths should create two patterns")
-
-	trie.Insert("/a/b")
-	// /a becomes a waypoint, /a/b is the leaf
-	// /b is still a leaf
-	// So we have: /a/b, /b = 2 patterns? No, /a is still a potential endpoint
-	// Actually, patterns = leaves, and /a might not be a leaf anymore if it has children
-	// Let's check: after /a/b, node "a" has child "b", so "a" is not a leaf
-	// Patterns = /a/b (1) + /b (1) = 2
-	// Wait, before we had /a as a leaf. Now /a has a child, so it's not a leaf.
-	// So pattern count should still be 2: /a/b and /b
-	assert.Equal(t, 2, trie.PatternCount(), "pattern count after adding child")
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"time"
 
 	"github.com/grafana/clusterurl/pkg/trie"
 )
@@ -19,6 +20,8 @@ func main() {
 	depth1Soft := flag.Int("depth1-soft", 0, "Soft cardinality override for depth 1 (0 = use default, -1 = no limit)")
 	depth0Hard := flag.Int("depth0-hard", 0, "Hard cardinality override for depth 0 (0 = use default, -1 = no limit)")
 	depth1Hard := flag.Int("depth1-hard", 0, "Hard cardinality override for depth 1 (0 = use default, -1 = no limit)")
+	patternTTL := flag.Duration("pattern-ttl", 0, "Pattern TTL (e.g., 1h, 30m). 0 = no expiration")
+	pruneInterval := flag.Duration("prune-interval", time.Minute, "How often to check for stale patterns")
 	topN := flag.Int("top", 20, "Number of top clusters to show")
 	flag.Parse()
 
@@ -53,6 +56,8 @@ func main() {
 		ReplaceWith:            "*",
 		Separator:              "/",
 		MaxDepth:               20,
+		PatternTTL:             *patternTTL,
+		PruneInterval:          *pruneInterval,
 	}
 
 	t, err := trie.NewPathTrie(cfg)
@@ -60,6 +65,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error creating trie: %v\n", err)
 		os.Exit(1)
 	}
+	defer t.Stop() // stop background pruner if running
 
 	// Prime the trie
 	for _, url := range urls {
