@@ -2,6 +2,7 @@ package trie
 
 import (
 	"math"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -28,16 +29,21 @@ type pathNode struct {
 
 	// isWildcard indicates if this node represents a collapsed wildcard
 	isWildcard bool
+
+	// depth is the depth of this node in the trie (root children = 0)
+	depth int
 }
 
 // PathTrie is a thread-safe trie for clustering URL paths.
 // It uses a two-threshold system:
 // - Soft threshold: After N unique children, new children go to wildcard but existing are preserved
 // - Hard threshold: After M unique children, all children collapse to a single wildcard
+// Additionally, a global MaxPatterns limit can trigger hard collapse of deepest soft-collapsed nodes.
 type PathTrie struct {
-	root *pathNode
-	mu   sync.RWMutex
-	cfg  *TrieConfig
+	root         *pathNode
+	mu           sync.RWMutex
+	cfg          *TrieConfig
+	patternCount int // current number of unique patterns (leaf paths)
 }
 
 // NewPathTrie creates a new PathTrie with the given configuration.
@@ -55,6 +61,7 @@ func NewPathTrie(config *TrieConfig) (*PathTrie, error) {
 		root: &pathNode{
 			segment:  "",
 			children: make(map[string]*pathNode),
+			depth:    -1, // root is at depth -1, so children are at depth 0
 		},
 		cfg: config,
 	}, nil
@@ -123,6 +130,7 @@ func isHTTPMethod(op string) bool {
 // Uses two-threshold collapsing:
 // - After soft threshold: new children go to wildcard, existing preserved
 // - After hard threshold: all children collapse to wildcard
+// Additionally, if MaxPatterns is exceeded, deepest soft-collapsed nodes are hard-collapsed.
 // Thread-safe.
 func (t *PathTrie) Insert(path string) string {
 	t.mu.Lock()
@@ -134,6 +142,11 @@ func (t *PathTrie) Insert(path string) string {
 	}
 
 	result := t.insertSegments(segments)
+
+	// Update pattern count and enforce limit
+	t.updatePatternCount()
+	t.enforcePatternLimit()
+
 	return t.cfg.Separator + strings.Join(result, t.cfg.Separator)
 }
 
@@ -157,7 +170,7 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 		// Case 1: Node is hard collapsed - everything goes to wildcard
 		if current.hardCollapsed {
 			result = append(result, t.cfg.ReplaceWith)
-			current = t.getOrCreateWildcard(current)
+			current = t.getOrCreateWildcard(current, depth)
 			continue
 		}
 
@@ -184,7 +197,7 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 
 			// Use wildcard
 			result = append(result, t.cfg.ReplaceWith)
-			current = t.getOrCreateWildcard(current)
+			current = t.getOrCreateWildcard(current, depth)
 			continue
 		}
 
@@ -216,7 +229,7 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 
 			// Soft collapse only - use wildcard for this new segment
 			result = append(result, t.cfg.ReplaceWith)
-			current = t.getOrCreateWildcard(current)
+			current = t.getOrCreateWildcard(current, depth)
 			continue
 		}
 
@@ -224,6 +237,7 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 		child = &pathNode{
 			segment:  segment,
 			children: make(map[string]*pathNode),
+			depth:    depth,
 		}
 		current.children[segment] = child
 		result = append(result, segment)
@@ -234,12 +248,13 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 }
 
 // getOrCreateWildcard returns the wildcard child of a node, creating it if needed.
-func (t *PathTrie) getOrCreateWildcard(node *pathNode) *pathNode {
+func (t *PathTrie) getOrCreateWildcard(node *pathNode, depth int) *pathNode {
 	if node.children[t.cfg.ReplaceWith] == nil {
 		node.children[t.cfg.ReplaceWith] = &pathNode{
 			segment:    t.cfg.ReplaceWith,
 			children:   make(map[string]*pathNode),
 			isWildcard: true,
+			depth:      depth,
 		}
 	}
 	return node.children[t.cfg.ReplaceWith]
@@ -254,8 +269,8 @@ func (t *PathTrie) hardCollapseNode(node *pathNode) {
 	node.hardCollapsed = true
 	node.softCollapsed = true
 
-	// Create or get wildcard node
-	wildcardNode := t.getOrCreateWildcard(node)
+	// Create or get wildcard node (children are at depth+1)
+	wildcardNode := t.getOrCreateWildcard(node, node.depth+1)
 
 	// Merge all explicit children into the wildcard node
 	for segment, child := range node.children {
@@ -374,7 +389,9 @@ func (t *PathTrie) Reset() {
 	t.root = &pathNode{
 		segment:  "",
 		children: make(map[string]*pathNode),
+		depth:    -1,
 	}
+	t.patternCount = 0
 }
 
 // NodeCount returns the approximate number of nodes in the trie.
@@ -396,4 +413,79 @@ func (t *PathTrie) countNodes(node *pathNode) int {
 		count += t.countNodes(child)
 	}
 	return count
+}
+
+// PatternCount returns the current number of unique patterns in the trie.
+// A pattern is a unique path from root to a leaf node.
+// Thread-safe.
+func (t *PathTrie) PatternCount() int {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.patternCount
+}
+
+// countPatterns counts all leaf nodes (nodes with no children) in the subtree.
+// This represents the number of unique patterns.
+func (t *PathTrie) countPatterns(node *pathNode) int {
+	if node == nil {
+		return 0
+	}
+	if len(node.children) == 0 {
+		return 1
+	}
+	count := 0
+	for _, child := range node.children {
+		count += t.countPatterns(child)
+	}
+	return count
+}
+
+// updatePatternCount recalculates the pattern count by traversing the trie.
+func (t *PathTrie) updatePatternCount() {
+	t.patternCount = t.countPatterns(t.root)
+}
+
+// findCollapseCandidates returns all soft-collapsed nodes that haven't been hard-collapsed.
+// These are candidates for hard collapse when over the pattern limit.
+func (t *PathTrie) findCollapseCandidates() []*pathNode {
+	var candidates []*pathNode
+	t.collectCandidates(t.root, &candidates)
+	return candidates
+}
+
+// collectCandidates recursively collects soft-collapsed nodes.
+func (t *PathTrie) collectCandidates(node *pathNode, candidates *[]*pathNode) {
+	if node == nil {
+		return
+	}
+	if node.softCollapsed && !node.hardCollapsed {
+		*candidates = append(*candidates, node)
+	}
+	for _, child := range node.children {
+		t.collectCandidates(child, candidates)
+	}
+}
+
+// enforcePatternLimit checks if the pattern count exceeds MaxPatterns.
+// If so, it hard-collapses the deepest soft-collapsed nodes until under the limit.
+func (t *PathTrie) enforcePatternLimit() {
+	if t.cfg.MaxPatterns <= 0 {
+		return // no limit
+	}
+
+	for t.patternCount > t.cfg.MaxPatterns {
+		candidates := t.findCollapseCandidates()
+		if len(candidates) == 0 {
+			break // no candidates to collapse, accept over limit
+		}
+
+		// Sort by depth descending (deepest first)
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].depth > candidates[j].depth
+		})
+
+		// Hard collapse the deepest candidate
+		t.hardCollapseNode(candidates[0])
+		t.updatePatternCount()
+	}
 }

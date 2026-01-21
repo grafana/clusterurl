@@ -16,6 +16,11 @@ type TrieConfig struct {
 	// Default: 100
 	HardMaxCardinality int `json:"hard_max_cardinality"`
 
+	// MaxPatterns is the global maximum number of unique patterns allowed.
+	// When exceeded, the deepest soft-collapsed nodes are hard-collapsed first.
+	// Default: 1000 (0 = no limit)
+	MaxPatterns int `json:"max_patterns"`
+
 	// DepthSoftCardinalities allows per-depth soft cardinality overrides.
 	// Key is the depth (0-indexed), value is the soft max cardinality.
 	// Use -1 for no limit at a specific depth.
@@ -47,6 +52,7 @@ func DefaultTrieConfig() *TrieConfig {
 	return &TrieConfig{
 		SoftMaxCardinality:     10,
 		HardMaxCardinality:     100,
+		MaxPatterns:            1000,
 		DepthSoftCardinalities: nil,
 		DepthHardCardinalities: nil,
 		ReplaceWith:            "*",
@@ -66,6 +72,9 @@ func (c *TrieConfig) Validate() error {
 	if c.HardMaxCardinality < c.SoftMaxCardinality {
 		return fmt.Errorf("HardMaxCardinality (%d) must be >= SoftMaxCardinality (%d)",
 			c.HardMaxCardinality, c.SoftMaxCardinality)
+	}
+	if c.MaxPatterns < 0 {
+		return fmt.Errorf("MaxPatterns must be >= 0, got %d", c.MaxPatterns)
 	}
 	if c.ReplaceWith == "" {
 		return fmt.Errorf("ReplaceWith cannot be empty")
