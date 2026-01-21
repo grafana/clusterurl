@@ -14,6 +14,7 @@ func main() {
 	urlsFile := flag.String("urls", "assets/urls-list.txt", "Path to URLs file")
 	softCard := flag.Int("soft", 10, "Soft max cardinality (preserve first N, then wildcard)")
 	hardCard := flag.Int("hard", 100, "Hard max cardinality (collapse all after N)")
+	maxPatterns := flag.Int("max-patterns", 1000, "Global max patterns (0 = no limit)")
 	depth0Soft := flag.Int("depth0-soft", 0, "Soft cardinality override for depth 0 (0 = use default, -1 = no limit)")
 	depth1Soft := flag.Int("depth1-soft", 0, "Soft cardinality override for depth 1 (0 = use default, -1 = no limit)")
 	depth0Hard := flag.Int("depth0-hard", 0, "Hard cardinality override for depth 0 (0 = use default, -1 = no limit)")
@@ -46,6 +47,7 @@ func main() {
 	cfg := &trie.TrieConfig{
 		SoftMaxCardinality:     *softCard,
 		HardMaxCardinality:     *hardCard,
+		MaxPatterns:            *maxPatterns,
 		DepthSoftCardinalities: depthSoftCards,
 		DepthHardCardinalities: depthHardCards,
 		ReplaceWith:            "*",

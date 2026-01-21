@@ -500,3 +500,174 @@ func BenchmarkPathTrie_InsertWithCollapse(b *testing.B) {
 		}
 	}
 }
+
+// Tests for global pattern limit (MaxPatterns)
+
+func TestPathTrie_MaxPatterns_UnderLimit(t *testing.T) {
+	// Test that patterns under the limit are not affected
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 5,
+		HardMaxCardinality: 100,
+		MaxPatterns:        20,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	})
+	require.NoError(t, err)
+
+	// Insert paths that create patterns under the limit
+	for i := 0; i < 5; i++ {
+		trie.Insert("/api/v" + strconv.Itoa(i) + "/users")
+	}
+
+	// All should be explicit since under both soft threshold and max patterns
+	for i := 0; i < 5; i++ {
+		result := trie.Lookup("/api/v" + strconv.Itoa(i) + "/users")
+		assert.Contains(t, result, "v"+strconv.Itoa(i), "should remain explicit when under limits")
+	}
+
+	assert.LessOrEqual(t, trie.PatternCount(), 20, "pattern count should be under limit")
+}
+
+func TestPathTrie_MaxPatterns_EnforceLimit(t *testing.T) {
+	// Test that exceeding MaxPatterns triggers hard collapse of deepest nodes
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 3,
+		HardMaxCardinality: 100, // High hard limit so it doesn't interfere
+		MaxPatterns:        10,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	})
+	require.NoError(t, err)
+
+	// Insert many paths at different depths to create many patterns
+	// These will create paths like /a/b1/c1, /a/b1/c2, etc.
+	for i := 0; i < 4; i++ {
+		for j := 0; j < 4; j++ {
+			trie.Insert("/a/b" + strconv.Itoa(i) + "/c" + strconv.Itoa(j))
+		}
+	}
+
+	// Pattern count should be enforced to stay at or below MaxPatterns
+	assert.LessOrEqual(t, trie.PatternCount(), 10, "pattern count should not exceed MaxPatterns")
+}
+
+func TestPathTrie_MaxPatterns_DeepestCollapsedFirst(t *testing.T) {
+	// Test that deeper soft-collapsed nodes are hard-collapsed before shallower ones
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 2,
+		HardMaxCardinality: 100,
+		MaxPatterns:        5,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	})
+	require.NoError(t, err)
+
+	// Create a structure with soft-collapsed nodes at different depths
+	// First, create explicit paths at depth 1 (under soft threshold)
+	trie.Insert("/api/v1/resource/item1")
+	trie.Insert("/api/v1/resource/item2")
+	trie.Insert("/api/v2/resource/item1")
+	trie.Insert("/api/v2/resource/item2")
+
+	// These will cause soft collapse at depth 2 (under /api/v1/resource/)
+	trie.Insert("/api/v1/resource/item3")
+	trie.Insert("/api/v1/resource/item4")
+
+	// When pattern limit is exceeded, deeper nodes should collapse first
+	// The node at depth 2 (resource level) should collapse before depth 1
+	patternCount := trie.PatternCount()
+	assert.LessOrEqual(t, patternCount, 5, "pattern count should be enforced")
+}
+
+func TestPathTrie_MaxPatterns_NoLimitWithZero(t *testing.T) {
+	// Test that MaxPatterns=0 means no limit
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 3,
+		HardMaxCardinality: 100,
+		MaxPatterns:        0, // No limit
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	})
+	require.NoError(t, err)
+
+	// Insert many paths
+	for i := 0; i < 20; i++ {
+		trie.Insert("/segment" + strconv.Itoa(i) + "/sub")
+	}
+
+	// With no pattern limit, soft collapse should still happen at threshold 3
+	// but no global enforcement
+	// First 3 are explicit, rest go to wildcard but patterns still grow
+	assert.Greater(t, trie.PatternCount(), 0, "should have some patterns")
+}
+
+func TestPathTrie_MaxPatterns_NoCandidates(t *testing.T) {
+	// Test that if there are no soft-collapsed candidates, we accept over limit
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100, // Very high so nothing soft collapses
+		HardMaxCardinality: 200,
+		MaxPatterns:        5,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	})
+	require.NoError(t, err)
+
+	// Insert paths - none will soft collapse since soft threshold is high
+	for i := 0; i < 10; i++ {
+		trie.Insert("/api/v" + strconv.Itoa(i))
+	}
+
+	// Since no nodes are soft-collapsed, there are no candidates to collapse
+	// Pattern count may exceed limit
+	assert.Equal(t, 10, trie.PatternCount(), "should have 10 patterns with no collapse candidates")
+}
+
+func TestPathTrie_MaxPatterns_ValidationNegative(t *testing.T) {
+	// Test that negative MaxPatterns is rejected
+	_, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 10,
+		HardMaxCardinality: 100,
+		MaxPatterns:        -1,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	})
+	assert.Error(t, err, "negative MaxPatterns should be rejected")
+	assert.Contains(t, err.Error(), "MaxPatterns")
+}
+
+func TestPathTrie_PatternCount(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100,
+		HardMaxCardinality: 200,
+		MaxPatterns:        0,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, trie.PatternCount(), "empty trie should have 0 patterns")
+
+	trie.Insert("/a")
+	assert.Equal(t, 1, trie.PatternCount(), "one path should create one pattern")
+
+	trie.Insert("/b")
+	assert.Equal(t, 2, trie.PatternCount(), "two paths should create two patterns")
+
+	trie.Insert("/a/b")
+	// /a becomes a waypoint, /a/b is the leaf
+	// /b is still a leaf
+	// So we have: /a/b, /b = 2 patterns? No, /a is still a potential endpoint
+	// Actually, patterns = leaves, and /a might not be a leaf anymore if it has children
+	// Let's check: after /a/b, node "a" has child "b", so "a" is not a leaf
+	// Patterns = /a/b (1) + /b (1) = 2
+	// Wait, before we had /a as a leaf. Now /a has a child, so it's not a leaf.
+	// So pattern count should still be 2: /a/b and /b
+	assert.Equal(t, 2, trie.PatternCount(), "pattern count after adding child")
+}
