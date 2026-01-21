@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // pathNode represents a single segment in the URL path trie.
@@ -27,11 +28,19 @@ type pathNode struct {
 	// Used to determine when to trigger hard collapse.
 	uniqueChildrenSeen int
 
+	// wildcardedSegments tracks segments that were routed to wildcard after soft collapse.
+	// This prevents counting the same segment multiple times toward hard collapse.
+	wildcardedSegments map[string]struct{}
+
 	// isWildcard indicates if this node represents a collapsed wildcard
 	isWildcard bool
 
 	// depth is the depth of this node in the trie (root children = 0)
 	depth int
+
+	// lastSeen is when this node was last accessed via Insert.
+	// Used for TTL-based pruning.
+	lastSeen time.Time
 }
 
 // PathTrie is a thread-safe trie for clustering URL paths.
@@ -44,10 +53,16 @@ type PathTrie struct {
 	mu           sync.RWMutex
 	cfg          *TrieConfig
 	patternCount int // current number of unique patterns (leaf paths)
+
+	// Pruning goroutine control
+	stopPrune chan struct{}  // signal to stop background pruning
+	pruneWg   sync.WaitGroup // wait for pruner goroutine to exit
 }
 
 // NewPathTrie creates a new PathTrie with the given configuration.
 // If config is nil, DefaultTrieConfig() is used.
+// If PruneInterval is configured, a background goroutine is started to prune stale patterns.
+// Call Stop() when done with the trie to stop the background goroutine.
 func NewPathTrie(config *TrieConfig) (*PathTrie, error) {
 	if config == nil {
 		config = DefaultTrieConfig()
@@ -57,14 +72,23 @@ func NewPathTrie(config *TrieConfig) (*PathTrie, error) {
 		return nil, err
 	}
 
-	return &PathTrie{
+	t := &PathTrie{
 		root: &pathNode{
 			segment:  "",
 			children: make(map[string]*pathNode),
 			depth:    -1, // root is at depth -1, so children are at depth 0
 		},
 		cfg: config,
-	}, nil
+	}
+
+	// Start background pruning if configured
+	if config.PruneInterval > 0 && config.PatternTTL > 0 {
+		t.stopPrune = make(chan struct{})
+		t.pruneWg.Add(1)
+		go t.startPruneLoop()
+	}
+
+	return t, nil
 }
 
 // getSoftMaxCardinality returns the soft max cardinality for a given depth.
@@ -100,14 +124,6 @@ func (t *PathTrie) parsePath(path string) []string {
 		path = path[:idx]
 	}
 
-	// Handle HTTP method prefix (e.g., "GET /path")
-	if idx := strings.Index(path, " "); idx > 0 {
-		op := path[:idx]
-		if isHTTPMethod(op) && idx < len(path) {
-			path = path[idx+1:]
-		}
-	}
-
 	// Trim leading/trailing separators and split
 	path = strings.Trim(path, t.cfg.Separator)
 	if path == "" {
@@ -115,15 +131,6 @@ func (t *PathTrie) parsePath(path string) []string {
 	}
 
 	return strings.Split(path, t.cfg.Separator)
-}
-
-// isHTTPMethod checks if the string is an HTTP method.
-func isHTTPMethod(op string) bool {
-	switch op {
-	case "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD":
-		return true
-	}
-	return false
 }
 
 // Insert adds a path to the trie and returns the normalized/clustered path.
@@ -183,16 +190,19 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 				continue
 			}
 
-			// New segment after soft collapse - count it and use wildcard
-			current.uniqueChildrenSeen++
+			// Check if this is a new unique segment we haven't seen before
+			if _, seen := current.wildcardedSegments[segment]; !seen {
+				current.wildcardedSegments[segment] = struct{}{}
+				current.uniqueChildrenSeen++
 
-			// Check if we've hit the hard threshold
-			hardMax := t.getHardMaxCardinality(depth)
-			if current.uniqueChildrenSeen > hardMax {
-				t.hardCollapseNode(current)
-				result = append(result, t.cfg.ReplaceWith)
-				current = current.children[t.cfg.ReplaceWith]
-				continue
+				// Check if we've hit the hard threshold
+				hardMax := t.getHardMaxCardinality(depth)
+				if current.uniqueChildrenSeen > hardMax {
+					t.hardCollapseNode(current)
+					result = append(result, t.cfg.ReplaceWith)
+					current = current.children[t.cfg.ReplaceWith]
+					continue
+				}
 			}
 
 			// Use wildcard
@@ -217,6 +227,12 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 		if current.uniqueChildrenSeen > softMax {
 			// Hit soft threshold - mark as soft collapsed
 			current.softCollapsed = true
+
+			// Track the triggering segment so it won't be counted again
+			if current.wildcardedSegments == nil {
+				current.wildcardedSegments = make(map[string]struct{})
+			}
+			current.wildcardedSegments[segment] = struct{}{}
 
 			// Check if we also hit hard threshold
 			hardMax := t.getHardMaxCardinality(depth)
@@ -244,6 +260,11 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 		current = child
 	}
 
+	// Update lastSeen on the final node for TTL tracking
+	if current != t.root {
+		current.lastSeen = time.Now()
+	}
+
 	return result
 }
 
@@ -268,6 +289,7 @@ func (t *PathTrie) hardCollapseNode(node *pathNode) {
 
 	node.hardCollapsed = true
 	node.softCollapsed = true
+	node.wildcardedSegments = nil // no longer needed after hard collapse
 
 	// Create or get wildcard node (children are at depth+1)
 	wildcardNode := t.getOrCreateWildcard(node, node.depth+1)
@@ -294,6 +316,7 @@ func (t *PathTrie) hardCollapseNode(node *pathNode) {
 
 // mergeChildren merges children from source into target.
 // This is called during hard collapse to combine all child paths.
+// TODO(goutham): Verify this works well.
 func (t *PathTrie) mergeChildren(target, source *pathNode) {
 	for segment, child := range source.children {
 		if existing, exists := target.children[segment]; exists {
@@ -426,11 +449,13 @@ func (t *PathTrie) PatternCount() int {
 
 // countPatterns counts all leaf nodes (nodes with no children) in the subtree.
 // This represents the number of unique patterns.
+// Root is not counted as a pattern.
 func (t *PathTrie) countPatterns(node *pathNode) int {
 	if node == nil {
 		return 0
 	}
-	if len(node.children) == 0 {
+	// Don't count root as a pattern
+	if len(node.children) == 0 && node != t.root {
 		return 1
 	}
 	count := 0
@@ -487,5 +512,90 @@ func (t *PathTrie) enforcePatternLimit() {
 		// Hard collapse the deepest candidate
 		t.hardCollapseNode(candidates[0])
 		t.updatePatternCount()
+	}
+}
+
+// PruneStale removes leaf patterns that haven't been seen since the given cutoff time.
+// Returns the number of patterns pruned. Thread-safe.
+func (t *PathTrie) PruneStale(cutoff time.Time) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.cfg.PatternTTL == 0 {
+		return 0 // TTL disabled
+	}
+
+	pruned := t.pruneNode(t.root, cutoff)
+	if pruned > 0 {
+		t.updatePatternCount()
+	}
+	return pruned
+}
+
+// pruneNode recursively prunes stale nodes from the given node's subtree.
+// Returns the number of leaf patterns pruned.
+// Must be called with lock held.
+func (t *PathTrie) pruneNode(node *pathNode, cutoff time.Time) int {
+	if node == nil {
+		return 0
+	}
+
+	pruned := 0
+	toDelete := make([]string, 0)
+
+	for segment, child := range node.children {
+		// First, recursively prune children
+		pruned += t.pruneNode(child, cutoff)
+
+		// Check if this child should be pruned:
+		// 1. It's a leaf (no children) AND
+		// 2. Either it has a stale lastSeen, OR it has no lastSeen (empty intermediate node)
+		if len(child.children) == 0 {
+			// If lastSeen is zero, this is an intermediate node that became empty after pruning
+			// If lastSeen is before cutoff, this is a stale leaf
+			if child.lastSeen.IsZero() || child.lastSeen.Before(cutoff) {
+				toDelete = append(toDelete, segment)
+				// Only count as pruned if it was a real leaf (had lastSeen set)
+				if !child.lastSeen.IsZero() {
+					pruned++
+				}
+			}
+		}
+	}
+
+	// Delete stale/empty children
+	for _, segment := range toDelete {
+		delete(node.children, segment)
+	}
+
+	return pruned
+}
+
+// startPruneLoop runs the background pruning loop.
+// It periodically calls PruneStale to remove patterns that haven't been seen recently.
+func (t *PathTrie) startPruneLoop() {
+	defer t.pruneWg.Done()
+
+	ticker := time.NewTicker(t.cfg.PruneInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			t.PruneStale(time.Now().Add(-t.cfg.PatternTTL))
+		case <-t.stopPrune:
+			return
+		}
+	}
+}
+
+// Stop stops the background pruning goroutine if it was started.
+// Call this when done with the trie to clean up resources.
+// It is safe to call Stop multiple times or on a trie without background pruning.
+func (t *PathTrie) Stop() {
+	if t.stopPrune != nil {
+		close(t.stopPrune)
+		t.pruneWg.Wait()
+		t.stopPrune = nil // prevent double close
 	}
 }

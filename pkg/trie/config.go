@@ -1,6 +1,9 @@
 package trie
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // TrieConfig configures the behavior of a PathTrie.
 type TrieConfig struct {
@@ -45,6 +48,16 @@ type TrieConfig struct {
 	// Segments beyond this depth are still processed but appended to the result.
 	// Default: 20
 	MaxDepth int `json:"max_depth"`
+
+	// PatternTTL is the time after which unused patterns are eligible for pruning.
+	// Patterns not accessed (via Insert) within this duration will be removed.
+	// Default: 10 minutes (0 = no expiration)
+	PatternTTL time.Duration `json:"pattern_ttl"`
+
+	// PruneInterval is how often the background pruning goroutine runs.
+	// Only used if PatternTTL > 0.
+	// Default: 60 seconds (0 = no background pruning)
+	PruneInterval time.Duration `json:"prune_interval"`
 }
 
 // DefaultTrieConfig returns a sensible default configuration.
@@ -58,6 +71,8 @@ func DefaultTrieConfig() *TrieConfig {
 		ReplaceWith:            "*",
 		Separator:              "/",
 		MaxDepth:               20,
+		PatternTTL:             10 * time.Minute,
+		PruneInterval:          60 * time.Second,
 	}
 }
 
@@ -103,6 +118,15 @@ func (c *TrieConfig) Validate() error {
 		if card == 0 || card < -1 {
 			return fmt.Errorf("DepthHardCardinalities: cardinality for depth %d must be positive or -1 (no limit), got %d", depth, card)
 		}
+	}
+	if c.PatternTTL < 0 {
+		return fmt.Errorf("PatternTTL cannot be negative, got %v", c.PatternTTL)
+	}
+	if c.PruneInterval < 0 {
+		return fmt.Errorf("PruneInterval cannot be negative, got %v", c.PruneInterval)
+	}
+	if c.PruneInterval > 0 && c.PatternTTL == 0 {
+		return fmt.Errorf("PruneInterval requires PatternTTL to be set")
 	}
 	return nil
 }
