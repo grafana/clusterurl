@@ -81,14 +81,18 @@ func NewPathTrie(config *TrieConfig) (*PathTrie, error) {
 		cfg: config,
 	}
 
+	return t, nil
+}
+
+// Start starts the background routine for pruning stale paths from the trie.
+// Must call `Stop` when you want to clean up the trie to avoid goroutine leaks.
+func (t *PathTrie) Start() {
 	// Start background pruning if configured
-	if config.PruneInterval > 0 && config.PatternTTL > 0 {
+	if t.cfg.PruneInterval > 0 && t.cfg.PatternTTL > 0 {
 		t.stopPrune = make(chan struct{})
 		t.pruneWg.Add(1)
-		go t.startPruneLoop()
+		go t.startPruneLoop(t.stopPrune)
 	}
-
-	return t, nil
 }
 
 // getSoftMaxCardinality returns the soft max cardinality for a given depth.
@@ -162,6 +166,8 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 	current := t.root
 	result := make([]string, 0, len(segments))
 
+	// We start at depth=0, with current=root (depth=-1).
+	// This means current.depth is always `depth-1`.
 	for depth, segment := range segments {
 		if segment == "" {
 			result = append(result, segment)
@@ -177,7 +183,7 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 		// Case 1: Node is hard collapsed - everything goes to wildcard
 		if current.hardCollapsed {
 			result = append(result, t.cfg.ReplaceWith)
-			current = t.getOrCreateWildcard(current, depth)
+			current = t.getOrCreateWildcardChild(current)
 			continue
 		}
 
@@ -207,7 +213,7 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 
 			// Use wildcard
 			result = append(result, t.cfg.ReplaceWith)
-			current = t.getOrCreateWildcard(current, depth)
+			current = t.getOrCreateWildcardChild(current)
 			continue
 		}
 
@@ -245,7 +251,7 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 
 			// Soft collapse only - use wildcard for this new segment
 			result = append(result, t.cfg.ReplaceWith)
-			current = t.getOrCreateWildcard(current, depth)
+			current = t.getOrCreateWildcardChild(current)
 			continue
 		}
 
@@ -268,14 +274,14 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 	return result
 }
 
-// getOrCreateWildcard returns the wildcard child of a node, creating it if needed.
-func (t *PathTrie) getOrCreateWildcard(node *pathNode, depth int) *pathNode {
+// getOrCreateWildcardChild returns the wildcard child of a node, creating it if needed.
+func (t *PathTrie) getOrCreateWildcardChild(node *pathNode) *pathNode {
 	if node.children[t.cfg.ReplaceWith] == nil {
 		node.children[t.cfg.ReplaceWith] = &pathNode{
 			segment:    t.cfg.ReplaceWith,
 			children:   make(map[string]*pathNode),
 			isWildcard: true,
-			depth:      depth,
+			depth:      node.depth + 1,
 		}
 	}
 	return node.children[t.cfg.ReplaceWith]
@@ -291,26 +297,25 @@ func (t *PathTrie) hardCollapseNode(node *pathNode) {
 	node.softCollapsed = true
 	node.wildcardedSegments = nil // no longer needed after hard collapse
 
-	// Create or get wildcard node (children are at depth+1)
-	wildcardNode := t.getOrCreateWildcard(node, node.depth+1)
+	wildcardChild := t.getOrCreateWildcardChild(node)
 
 	// Merge all explicit children into the wildcard node
 	for segment, child := range node.children {
 		if segment == t.cfg.ReplaceWith {
 			continue // Skip the wildcard itself
 		}
-		t.mergeChildren(wildcardNode, child)
+		t.mergeChildren(wildcardChild, child)
 	}
 
 	// Replace all children with just the wildcard
 	node.children = map[string]*pathNode{
-		t.cfg.ReplaceWith: wildcardNode,
+		t.cfg.ReplaceWith: wildcardChild,
 	}
 
 	// Recursively check if wildcard node needs hard collapsing
 	// Use default thresholds for merged nodes
-	if wildcardNode.uniqueChildrenSeen > t.cfg.HardMaxCardinality {
-		t.hardCollapseNode(wildcardNode)
+	if wildcardChild.uniqueChildrenSeen > t.cfg.HardMaxCardinality {
+		t.hardCollapseNode(wildcardChild)
 	}
 }
 
@@ -573,7 +578,7 @@ func (t *PathTrie) pruneNode(node *pathNode, cutoff time.Time) int {
 
 // startPruneLoop runs the background pruning loop.
 // It periodically calls PruneStale to remove patterns that haven't been seen recently.
-func (t *PathTrie) startPruneLoop() {
+func (t *PathTrie) startPruneLoop(stopChan chan struct{}) {
 	defer t.pruneWg.Done()
 
 	ticker := time.NewTicker(t.cfg.PruneInterval)
@@ -583,7 +588,7 @@ func (t *PathTrie) startPruneLoop() {
 		select {
 		case <-ticker.C:
 			t.PruneStale(time.Now().Add(-t.cfg.PatternTTL))
-		case <-t.stopPrune:
+		case <-stopChan:
 			return
 		}
 	}
@@ -593,9 +598,17 @@ func (t *PathTrie) startPruneLoop() {
 // Call this when done with the trie to clean up resources.
 // It is safe to call Stop multiple times or on a trie without background pruning.
 func (t *PathTrie) Stop() {
-	if t.stopPrune != nil {
-		close(t.stopPrune)
+	// If we do a simple defer t.mu.Unlock(), then the background routine in prune
+	// can trigger a PruneStale() that also tries to acquire the lock. That routine
+	// will be stuck, and this current routine will be stuck on `t.pruneWg.Wait()`
+	// as well.
+	t.mu.Lock()
+	stopChan := t.stopPrune
+	t.stopPrune = nil // prevent double close
+	t.mu.Unlock()     // Release lock BEFORE waiting.
+
+	if stopChan != nil {
+		close(stopChan)
 		t.pruneWg.Wait()
-		t.stopPrune = nil // prevent double close
 	}
 }
