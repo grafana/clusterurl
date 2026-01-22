@@ -802,6 +802,8 @@ func TestPathTrie_Stop_TerminatesGoroutine(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	trie.Start()
+
 	// Goroutine count should have increased
 	assert.Greater(t, runtime.NumGoroutine(), goroutinesBefore, "pruning goroutine should have started")
 
@@ -846,6 +848,7 @@ func TestPathTrie_BackgroundPruning(t *testing.T) {
 		PruneInterval:      20 * time.Millisecond,
 	})
 	require.NoError(t, err)
+	trie.Start()
 	defer trie.Stop()
 
 	trie.Insert("/api/v1/users")
