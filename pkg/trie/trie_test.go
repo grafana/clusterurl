@@ -497,6 +497,57 @@ func TestTrieConfig_Validate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "depth soft > hard (using default hard)",
+			config: &TrieConfig{
+				SoftMaxCardinality:     10,
+				HardMaxCardinality:     100,
+				DepthSoftCardinalities: map[int]int{0: 150}, // 150 > default hard 100
+				ReplaceWith:            "*",
+				Separator:              "/",
+				MaxDepth:               20,
+			},
+			wantErr: true,
+		},
+		{
+			name: "depth soft > depth hard",
+			config: &TrieConfig{
+				SoftMaxCardinality:     10,
+				HardMaxCardinality:     100,
+				DepthSoftCardinalities: map[int]int{0: 50},
+				DepthHardCardinalities: map[int]int{0: 20}, // 20 < soft 50
+				ReplaceWith:            "*",
+				Separator:              "/",
+				MaxDepth:               20,
+			},
+			wantErr: true,
+		},
+		{
+			name: "depth soft with no hard limit is valid",
+			config: &TrieConfig{
+				SoftMaxCardinality:     10,
+				HardMaxCardinality:     100,
+				DepthSoftCardinalities: map[int]int{0: 500},
+				DepthHardCardinalities: map[int]int{0: -1}, // no limit
+				ReplaceWith:            "*",
+				Separator:              "/",
+				MaxDepth:               20,
+			},
+			wantErr: false,
+		},
+		{
+			name: "depth soft -1 with any hard is valid",
+			config: &TrieConfig{
+				SoftMaxCardinality:     10,
+				HardMaxCardinality:     100,
+				DepthSoftCardinalities: map[int]int{0: -1}, // no soft limit
+				DepthHardCardinalities: map[int]int{0: 5},
+				ReplaceWith:            "*",
+				Separator:              "/",
+				MaxDepth:               20,
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
