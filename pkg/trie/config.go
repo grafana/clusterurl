@@ -119,6 +119,26 @@ func (c *TrieConfig) Validate() error {
 			return fmt.Errorf("DepthHardCardinalities: cardinality for depth %d must be positive or -1 (no limit), got %d", depth, card)
 		}
 	}
+	// Validate that soft <= hard at each depth with overrides
+	for depth, softCard := range c.DepthSoftCardinalities {
+		if softCard == -1 {
+			continue // no soft limit is always valid
+		}
+		// Get the effective hard cardinality for this depth
+		hardCard := c.HardMaxCardinality
+		if c.DepthHardCardinalities != nil {
+			if h, ok := c.DepthHardCardinalities[depth]; ok {
+				if h == -1 {
+					continue // no hard limit is always valid
+				}
+				hardCard = h
+			}
+		}
+		if hardCard < softCard {
+			return fmt.Errorf("at depth %d: HardMaxCardinality (%d) must be >= SoftMaxCardinality (%d)",
+				depth, hardCard, softCard)
+		}
+	}
 	if c.PatternTTL < 0 {
 		return fmt.Errorf("PatternTTL cannot be negative, got %v", c.PatternTTL)
 	}
