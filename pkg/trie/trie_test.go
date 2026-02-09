@@ -1014,6 +1014,34 @@ func BenchmarkPathTrie_Lookup(b *testing.B) {
 	}
 }
 
+func BenchmarkPathTrie_InsertExisting(b *testing.B) {
+	trie, _ := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 10,
+		HardMaxCardinality: 100,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	})
+
+	paths := []string{
+		"/users/profile/details",
+		"/api/v1/orders",
+		"/products/categories/electronics",
+		"/api/v2/settings",
+		"/health/ready",
+	}
+	for _, path := range paths {
+		trie.Insert(path)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, path := range paths {
+			trie.Insert(path)
+		}
+	}
+}
+
 func BenchmarkPathTrie_InsertWithCollapse(b *testing.B) {
 	paths := make([]string, 1000)
 	for i := 0; i < 1000; i++ {
