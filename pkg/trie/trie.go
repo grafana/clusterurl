@@ -152,19 +152,23 @@ func (t *PathTrie) Insert(path string) string {
 		return path
 	}
 
-	result := t.insertSegments(segments)
+	result, changed := t.insertSegments(segments)
 
-	// Update pattern count and enforce limit
-	t.updatePatternCount()
-	t.enforcePatternLimit()
+	// Only update pattern count and enforce limit if the trie was modified
+	if changed {
+		t.updatePatternCount()
+		t.enforcePatternLimit()
+	}
 
 	return t.cfg.Separator + strings.Join(result, t.cfg.Separator)
 }
 
-// insertSegments inserts segments into the trie and returns the resulting path.
-func (t *PathTrie) insertSegments(segments []string) []string {
+// insertSegments inserts segments into the trie and returns the resulting path
+// and whether the trie was structurally modified (new nodes created or nodes collapsed).
+func (t *PathTrie) insertSegments(segments []string) ([]string, bool) {
 	current := t.root
 	result := make([]string, 0, len(segments))
+	changed := false
 
 	// We start at depth=0, with current=root (depth=-1).
 	// This means current.depth is always `depth-1`.
@@ -198,6 +202,7 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 
 			// Check if this is a new unique segment we haven't seen before
 			if _, seen := current.wildcardedSegments[segment]; !seen {
+				changed = true
 				current.wildcardedSegments[segment] = struct{}{}
 				current.uniqueChildrenSeen++
 
@@ -226,7 +231,8 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 			continue
 		}
 
-		// New segment - check soft threshold
+		// New segment - trie is being modified
+		changed = true
 		current.uniqueChildrenSeen++
 		softMax := t.getSoftMaxCardinality(depth)
 
@@ -271,7 +277,7 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 		current.lastSeen = time.Now()
 	}
 
-	return result
+	return result, changed
 }
 
 // getOrCreateWildcardChild returns the wildcard child of a node, creating it if needed.
