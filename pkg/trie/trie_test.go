@@ -19,7 +19,7 @@ func TestPathTrie_SoftThreshold(t *testing.T) {
 		ReplaceWith:        "*",
 		Separator:          "/",
 		MaxDepth:           20,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// First 3 should be explicit
@@ -48,7 +48,7 @@ func TestPathTrie_HardThreshold(t *testing.T) {
 		ReplaceWith:        "*",
 		Separator:          "/",
 		MaxDepth:           20,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// First 2 explicit
@@ -86,7 +86,7 @@ func TestPathTrie_DepthBasedThresholds(t *testing.T) {
 		ReplaceWith: "*",
 		Separator:   "/",
 		MaxDepth:    20,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// Add 5 different first segments - should all be explicit
@@ -133,7 +133,7 @@ func TestPathTrie_NoLimitWithMinusOne(t *testing.T) {
 		ReplaceWith: "*",
 		Separator:   "/",
 		MaxDepth:    20,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// Add many first segments - should never collapse
@@ -155,7 +155,7 @@ func TestPathTrie_NoLimitWithMinusOne(t *testing.T) {
 		ReplaceWith: "*",
 		Separator:   "/",
 		MaxDepth:    20,
-	})
+	}, nil)
 
 	trie2.Insert("api/v1/users")
 	trie2.Insert("api/v2/users")
@@ -168,7 +168,7 @@ func TestPathTrie_NoLimitWithMinusOne(t *testing.T) {
 }
 
 func TestPathTrie_EmptyPath(t *testing.T) {
-	trie, err := NewPathTrie(nil)
+	trie, err := NewPathTrie(nil, nil)
 	require.NoError(t, err)
 
 	assert.Empty(t, trie.Insert(""))
@@ -176,7 +176,7 @@ func TestPathTrie_EmptyPath(t *testing.T) {
 }
 
 func TestPathTrie_SingleSegment(t *testing.T) {
-	trie, err := NewPathTrie(nil)
+	trie, err := NewPathTrie(nil, nil)
 	require.NoError(t, err)
 
 	result := trie.Insert("test")
@@ -187,7 +187,7 @@ func TestPathTrie_SingleSegment(t *testing.T) {
 }
 
 func TestPathTrie_QueryString(t *testing.T) {
-	trie, err := NewPathTrie(nil)
+	trie, err := NewPathTrie(nil, nil)
 	require.NoError(t, err)
 
 	result := trie.Insert("/attach?session_id=ddfsdsf&track_id=sjdklnfldsn")
@@ -195,7 +195,7 @@ func TestPathTrie_QueryString(t *testing.T) {
 }
 
 func TestPathTrie_Reset(t *testing.T) {
-	trie, err := NewPathTrie(nil)
+	trie, err := NewPathTrie(nil, nil)
 	require.NoError(t, err)
 
 	trie.Insert("/api/v1/users")
@@ -209,7 +209,7 @@ func TestPathTrie_Reset(t *testing.T) {
 }
 
 func TestPathTrie_NodeCount(t *testing.T) {
-	trie, err := NewPathTrie(nil)
+	trie, err := NewPathTrie(nil, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, trie.NodeCount()) // Root only
@@ -228,7 +228,7 @@ func TestPathTrie_Concurrent(t *testing.T) {
 		ReplaceWith:        "*",
 		Separator:          "/",
 		MaxDepth:           20,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
@@ -263,7 +263,7 @@ func TestPathTrie_HardThreshold_UniqueSegmentCounting(t *testing.T) {
 		ReplaceWith:        "*",
 		Separator:          "/",
 		MaxDepth:           20,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// First 2 explicit
@@ -305,7 +305,7 @@ func TestPathTrie_CascadingCollapse(t *testing.T) {
 		ReplaceWith:        "*",
 		Separator:          "/",
 		MaxDepth:           20,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// Build tree with multiple branches
@@ -573,7 +573,7 @@ func TestPathTrie_MaxPatterns_UnderLimit(t *testing.T) {
 		ReplaceWith:        "*",
 		Separator:          "/",
 		MaxDepth:           20,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// Insert paths that create patterns under the limit
@@ -608,7 +608,7 @@ func TestPathTrie_MaxPatterns_EnforceLimit(t *testing.T) {
 		ReplaceWith:        "*",
 		Separator:          "/",
 		MaxDepth:           20,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// Insert many paths at different depths to create many patterns
@@ -632,7 +632,7 @@ func TestPathTrie_MaxPatterns_DeepestCollapsedFirst(t *testing.T) {
 		ReplaceWith:        "*",
 		Separator:          "/",
 		MaxDepth:           20,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// Create a structure with soft-collapsed nodes at different depths
@@ -664,7 +664,7 @@ func TestPathTrie_MaxPatterns_NoCandidates(t *testing.T) {
 		ReplaceWith:        "*",
 		Separator:          "/",
 		MaxDepth:           20,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// Insert paths - none will soft collapse since soft threshold is high
@@ -685,7 +685,7 @@ func TestPathTrie_PatternCount(t *testing.T) {
 		ReplaceWith:        "*",
 		Separator:          "/",
 		MaxDepth:           20,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, 0, trie.PatternCount(), "empty trie should have 0 patterns")
@@ -720,7 +720,7 @@ func TestPathTrie_PruneStale_TTLDisabled(t *testing.T) {
 		Separator:          "/",
 		MaxDepth:           20,
 		PatternTTL:         0, // disabled
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	trie.Insert("/api/v1/users")
@@ -742,7 +742,7 @@ func TestPathTrie_PruneStale_FreshPatternsPreserved(t *testing.T) {
 		Separator:          "/",
 		MaxDepth:           20,
 		PatternTTL:         time.Hour,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	trie.Insert("/api/v1/users")
@@ -765,7 +765,7 @@ func TestPathTrie_PruneStale_StalePatternsRemoved(t *testing.T) {
 		Separator:          "/",
 		MaxDepth:           20,
 		PatternTTL:         time.Hour,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	trie.Insert("/api/v1/users")
@@ -788,7 +788,7 @@ func TestPathTrie_PruneStale_ParentCleanup(t *testing.T) {
 		Separator:          "/",
 		MaxDepth:           20,
 		PatternTTL:         time.Hour,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	trie.Insert("/api/v1/users/profile")
@@ -815,7 +815,7 @@ func TestPathTrie_PruneStale_PartialPrune(t *testing.T) {
 		Separator:          "/",
 		MaxDepth:           20,
 		PatternTTL:         time.Hour,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// Insert first pattern
@@ -850,7 +850,7 @@ func TestPathTrie_Stop_TerminatesGoroutine(t *testing.T) {
 		MaxDepth:           20,
 		PatternTTL:         time.Hour,
 		PruneInterval:      10 * time.Millisecond,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	trie.Start()
@@ -880,7 +880,7 @@ func TestPathTrie_Stop_NoGoroutine(t *testing.T) {
 		Separator:          "/",
 		MaxDepth:           20,
 		PatternTTL:         0, // no pruning
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// Should not panic
@@ -897,7 +897,7 @@ func TestPathTrie_BackgroundPruning(t *testing.T) {
 		MaxDepth:           20,
 		PatternTTL:         50 * time.Millisecond,
 		PruneInterval:      20 * time.Millisecond,
-	})
+	}, nil)
 	require.NoError(t, err)
 	trie.Start()
 	defer trie.Stop()
@@ -920,7 +920,7 @@ func TestPathTrie_ConcurrentInsertAndPrune(t *testing.T) {
 		Separator:          "/",
 		MaxDepth:           20,
 		PatternTTL:         time.Hour,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
@@ -964,7 +964,7 @@ func BenchmarkPathTrie_Insert(b *testing.B) {
 		ReplaceWith:        "*",
 		Separator:          "/",
 		MaxDepth:           20,
-	})
+	}, nil)
 
 	paths := []string{
 		"/users/fdklsd/j4elk/23993/job/2",
@@ -992,7 +992,7 @@ func BenchmarkPathTrie_Lookup(b *testing.B) {
 		ReplaceWith:        "*",
 		Separator:          "/",
 		MaxDepth:           20,
-	})
+	}, nil)
 
 	// Pre-populate trie
 	paths := []string{
@@ -1021,7 +1021,7 @@ func BenchmarkPathTrie_InsertExisting(b *testing.B) {
 		ReplaceWith:        "*",
 		Separator:          "/",
 		MaxDepth:           20,
-	})
+	}, nil)
 
 	paths := []string{
 		"/users/profile/details",
@@ -1056,7 +1056,7 @@ func BenchmarkPathTrie_InsertWithCollapse(b *testing.B) {
 			ReplaceWith:        "*",
 			Separator:          "/",
 			MaxDepth:           20,
-		})
+		}, nil)
 		for _, path := range paths {
 			trie.Insert(path)
 		}
