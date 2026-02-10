@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -38,9 +39,9 @@ type pathNode struct {
 	// depth is the depth of this node in the trie (root children = 0)
 	depth int
 
-	// lastSeen is when this node was last accessed via Insert.
-	// Used for TTL-based pruning.
-	lastSeen time.Time
+	// lastSeen stores time.Now().UnixNano() when this node was last accessed via Insert.
+	// Used for TTL-based pruning. Zero means "never seen".
+	lastSeen atomic.Int64
 }
 
 // PathTrie is a thread-safe trie for clustering URL paths.
@@ -144,27 +145,42 @@ func (t *PathTrie) parsePath(path string) []string {
 // Additionally, if MaxPatterns is exceeded, deepest soft-collapsed nodes are hard-collapsed.
 // Thread-safe.
 func (t *PathTrie) Insert(path string) string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	segments := t.parsePath(path)
 	if len(segments) == 0 {
 		return path
 	}
 
-	result := t.insertSegments(segments)
+	// Fast path: read-only traversal under RLock
+	t.mu.RLock()
+	result, _ := t.insertSegments(segments, true)
+	t.mu.RUnlock()
 
-	// Update pattern count and enforce limit
-	t.updatePatternCount()
-	t.enforcePatternLimit()
+	if result != nil {
+		return t.cfg.Separator + strings.Join(result, t.cfg.Separator)
+	}
+
+	// Slow path: full write lock
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	result, changed := t.insertSegments(segments, false)
+
+	// Only update pattern count and enforce limit if the trie was modified
+	if changed {
+		t.updatePatternCount()
+		t.enforcePatternLimit()
+	}
 
 	return t.cfg.Separator + strings.Join(result, t.cfg.Separator)
 }
 
-// insertSegments inserts segments into the trie and returns the resulting path.
-func (t *PathTrie) insertSegments(segments []string) []string {
+// insertSegments inserts segments into the trie and returns the resulting path
+// and whether the trie was structurally modified (new nodes created or nodes collapsed).
+// When readOnly is true, the method returns (nil, false) if any write would be needed.
+func (t *PathTrie) insertSegments(segments []string, readOnly bool) ([]string, bool) {
 	current := t.root
 	result := make([]string, 0, len(segments))
+	changed := false
 
 	// We start at depth=0, with current=root (depth=-1).
 	// This means current.depth is always `depth-1`.
@@ -182,8 +198,15 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 
 		// Case 1: Node is hard collapsed - everything goes to wildcard
 		if current.hardCollapsed {
+			wc := current.children[t.cfg.ReplaceWith]
+			if wc == nil {
+				if readOnly {
+					return nil, false
+				}
+				wc = t.getOrCreateWildcardChild(current)
+			}
 			result = append(result, t.cfg.ReplaceWith)
-			current = t.getOrCreateWildcardChild(current)
+			current = wc
 			continue
 		}
 
@@ -198,6 +221,10 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 
 			// Check if this is a new unique segment we haven't seen before
 			if _, seen := current.wildcardedSegments[segment]; !seen {
+				if readOnly {
+					return nil, false
+				}
+				changed = true
 				current.wildcardedSegments[segment] = struct{}{}
 				current.uniqueChildrenSeen++
 
@@ -212,8 +239,15 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 			}
 
 			// Use wildcard
+			wc := current.children[t.cfg.ReplaceWith]
+			if wc == nil {
+				if readOnly {
+					return nil, false
+				}
+				wc = t.getOrCreateWildcardChild(current)
+			}
 			result = append(result, t.cfg.ReplaceWith)
-			current = t.getOrCreateWildcardChild(current)
+			current = wc
 			continue
 		}
 
@@ -226,7 +260,12 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 			continue
 		}
 
-		// New segment - check soft threshold
+		if readOnly {
+			return nil, false
+		}
+
+		// New segment - trie is being modified
+		changed = true
 		current.uniqueChildrenSeen++
 		softMax := t.getSoftMaxCardinality(depth)
 
@@ -268,10 +307,10 @@ func (t *PathTrie) insertSegments(segments []string) []string {
 
 	// Update lastSeen on the final node for TTL tracking
 	if current != t.root {
-		current.lastSeen = time.Now()
+		current.lastSeen.Store(time.Now().UnixNano())
 	}
 
-	return result
+	return result, changed
 }
 
 // getOrCreateWildcardChild returns the wildcard child of a node, creating it if needed.
@@ -556,12 +595,13 @@ func (t *PathTrie) pruneNode(node *pathNode, cutoff time.Time) int {
 		// 1. It's a leaf (no children) AND
 		// 2. Either it has a stale lastSeen, OR it has no lastSeen (empty intermediate node)
 		if len(child.children) == 0 {
+			lastSeen := child.lastSeen.Load()
 			// If lastSeen is zero, this is an intermediate node that became empty after pruning
 			// If lastSeen is before cutoff, this is a stale leaf
-			if child.lastSeen.IsZero() || child.lastSeen.Before(cutoff) {
+			if lastSeen == 0 || lastSeen < cutoff.UnixNano() {
 				toDelete = append(toDelete, segment)
 				// Only count as pruned if it was a real leaf (had lastSeen set)
-				if !child.lastSeen.IsZero() {
+				if lastSeen != 0 {
 					pruned++
 				}
 			}
