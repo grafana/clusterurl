@@ -60,7 +60,7 @@ func main() {
 		PruneInterval:          *pruneInterval,
 	}
 
-	t, err := trie.NewPathTrie(cfg)
+	t, err := trie.NewPathTrie(cfg, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating trie: %v\n", err)
 		os.Exit(1)

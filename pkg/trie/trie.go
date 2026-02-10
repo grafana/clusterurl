@@ -53,6 +53,7 @@ type PathTrie struct {
 	root         *pathNode
 	mu           sync.RWMutex
 	cfg          *TrieConfig
+	metrics      *Metrics
 	patternCount int // current number of unique patterns (leaf paths)
 
 	// Pruning goroutine control
@@ -64,7 +65,7 @@ type PathTrie struct {
 // If config is nil, DefaultTrieConfig() is used.
 // If PruneInterval is configured, a background goroutine is started to prune stale patterns.
 // Call Stop() when done with the trie to stop the background goroutine.
-func NewPathTrie(config *TrieConfig) (*PathTrie, error) {
+func NewPathTrie(config *TrieConfig, metrics *Metrics) (*PathTrie, error) {
 	if config == nil {
 		config = DefaultTrieConfig()
 	}
@@ -79,7 +80,8 @@ func NewPathTrie(config *TrieConfig) (*PathTrie, error) {
 			children: make(map[string]*pathNode),
 			depth:    -1, // root is at depth -1, so children are at depth 0
 		},
-		cfg: config,
+		cfg:     config,
+		metrics: metrics,
 	}
 
 	return t, nil
@@ -150,6 +152,10 @@ func (t *PathTrie) Insert(path string) string {
 		return path
 	}
 
+	if t.metrics != nil {
+		t.metrics.TotalWrites.Inc()
+	}
+
 	// Fast path: read-only traversal under RLock
 	t.mu.RLock()
 	result, _ := t.insertSegments(segments, true)
@@ -167,6 +173,9 @@ func (t *PathTrie) Insert(path string) string {
 
 	// Only update pattern count and enforce limit if the trie was modified
 	if changed {
+		if t.metrics != nil {
+			t.metrics.TotalWritesWithChanges.Inc()
+		}
 		t.updatePatternCount()
 		t.enforcePatternLimit()
 	}
@@ -512,6 +521,9 @@ func (t *PathTrie) countPatterns(node *pathNode) int {
 // updatePatternCount recalculates the pattern count by traversing the trie.
 func (t *PathTrie) updatePatternCount() {
 	t.patternCount = t.countPatterns(t.root)
+	if t.metrics != nil {
+		t.metrics.PatternCount.Set(float64(t.patternCount))
+	}
 }
 
 // findCollapseCandidates returns all soft-collapsed nodes that haven't been hard-collapsed.
