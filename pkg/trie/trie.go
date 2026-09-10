@@ -378,6 +378,16 @@ func (t *PathTrie) mergeChildren(target, source *pathNode) {
 			// Inherit collapse state
 			if child.softCollapsed {
 				existing.softCollapsed = true
+				// existing may not have gone through its own soft-collapse
+				// transition, in which case wildcardedSegments is still nil.
+				// Initialize it here so subsequent Insert calls (which assume
+				// a soft-collapsed node always has a non-nil map) don't panic.
+				if existing.wildcardedSegments == nil {
+					existing.wildcardedSegments = make(map[string]struct{})
+				}
+				for seg := range child.wildcardedSegments {
+					existing.wildcardedSegments[seg] = struct{}{}
+				}
 			}
 			if child.hardCollapsed {
 				existing.hardCollapsed = true
