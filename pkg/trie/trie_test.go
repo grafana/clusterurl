@@ -1062,3 +1062,51 @@ func BenchmarkPathTrie_InsertWithCollapse(b *testing.B) {
 		}
 	}
 }
+
+// TestPathTrie_HardCollapse_MergeInheritsSoftCollapseWithoutNilMap reproduces a
+// production panic ("assignment to entry in nil map") that occurred when
+// hardCollapseNode merged a soft-collapsed child into a same-named sibling that
+// had not gone through its own soft-collapse transition. mergeChildren copied the
+// softCollapsed flag onto the target node but left its wildcardedSegments map nil,
+// so the next Insert into that node panicked when writing to the nil map.
+func TestPathTrie_HardCollapse_MergeInheritsSoftCollapseWithoutNilMap(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 10,
+		HardMaxCardinality: 100,
+		DepthSoftCardinalities: map[int]int{
+			1: 1, // order-id children of "orders": 2nd unique id soft-collapses "orders"
+			2: 2, // children of an order-id node: 3rd unique child soft-collapses it
+			3: 1, // children of those: 2nd unique child soft-collapses them
+		},
+		DepthHardCardinalities: map[int]int{
+			1: 2, // "orders": 3rd unique order id (beyond the explicit one) hard-collapses it
+		},
+		ReplaceWith: "*",
+		Separator:   "/",
+		MaxDepth:    20,
+	}, nil)
+	require.NoError(t, err)
+
+	// o1 stays explicit under "orders" and soft-collapses its own "g1" child by
+	// giving it two grandchildren (soft threshold at depth 3 is 1).
+	assert.Equal(t, "/orders/o1/g1/h1", trie.Insert("orders/o1/g1/h1"))
+	assert.Equal(t, "/orders/o1/g1/*", trie.Insert("orders/o1/g1/h2"))
+
+	// o2 is the second unique order id, which soft-collapses "orders" and routes
+	// through its wildcard child. That wildcard child gets its own, NOT
+	// soft-collapsed, "g1" child.
+	assert.Equal(t, "/orders/*/g1", trie.Insert("orders/o2/g1"))
+
+	// o3 is the third unique order id, which hard-collapses "orders". This merges
+	// o1 (explicit, whose "g1" child is soft-collapsed) into the wildcard child,
+	// where a not-yet-soft-collapsed "g1" node (from o2) already exists.
+	assert.Equal(t, "/orders/*/g1", trie.Insert("orders/o3/g1"))
+
+	// The merged "g1" node under the wildcard is now marked soft-collapsed.
+	// Inserting a brand-new grandchild segment under it must not panic on a nil
+	// wildcardedSegments map.
+	assert.NotPanics(t, func() {
+		result := trie.Insert("orders/o4/g1/hNew")
+		assert.Equal(t, "/orders/*/g1/*", result)
+	})
+}
