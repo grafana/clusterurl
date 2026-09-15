@@ -392,13 +392,23 @@ func (t *PathTrie) mergeChildren(target, source *pathNode) {
 			if child.hardCollapsed {
 				existing.hardCollapsed = true
 			}
-			// Recompute uniqueChildrenSeen as the true cardinality of the union
-			// of segments ever seen: explicit children (excluding the wildcard
-			// node itself) plus segments recorded only in wildcardedSegments.
-			// Taking max(existing, child) undercounts whenever both sides
-			// contribute segments the other side doesn't already account for,
-			// which can leave a node stuck soft-collapsed instead of
-			// progressing to a hard collapse.
+			// Recompute the union of segments still visible via explicit
+			// children (excluding the wildcard node itself) plus
+			// wildcardedSegments. Taking a plain max(existing, child) of the
+			// two counters undercounts whenever both sides contribute
+			// segments the other side doesn't already account for, which can
+			// leave a node stuck soft-collapsed instead of progressing to a
+			// hard collapse.
+			//
+			// However, pruneNode deletes stale leaves from `children`
+			// without decrementing uniqueChildrenSeen, since that field is
+			// documented as the total ever seen, not the current count. So
+			// the currently-visible union can be smaller than the true
+			// historical cardinality already captured in existing's or
+			// child's counters. Take the max of the recomputed union and
+			// both prior counters so a merge can only raise
+			// uniqueChildrenSeen, never erase history that pruning already
+			// caused to disappear from the visible sets.
 			seen := make(map[string]struct{}, len(existing.children)+len(existing.wildcardedSegments))
 			for seg := range existing.children {
 				if seg != t.cfg.ReplaceWith {
@@ -408,7 +418,14 @@ func (t *PathTrie) mergeChildren(target, source *pathNode) {
 			for seg := range existing.wildcardedSegments {
 				seen[seg] = struct{}{}
 			}
-			existing.uniqueChildrenSeen = len(seen)
+			merged := len(seen)
+			if existing.uniqueChildrenSeen > merged {
+				merged = existing.uniqueChildrenSeen
+			}
+			if child.uniqueChildrenSeen > merged {
+				merged = child.uniqueChildrenSeen
+			}
+			existing.uniqueChildrenSeen = merged
 		} else {
 			// New child, add it
 			target.children[segment] = child

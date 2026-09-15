@@ -1175,3 +1175,48 @@ func TestPathTrie_HardCollapse_MergeRecomputesUniqueChildrenSeen(t *testing.T) {
 	assert.Equal(t, "/orders/*/g1/*", result)
 	assert.True(t, mergedG1.hardCollapsed, "merged node should hard-collapse once the true cardinality exceeds the hard threshold")
 }
+
+// TestPathTrie_MergeChildren_PreservesHistoricalCardinalityAfterPruning reproduces
+// a follow-up bug in the union-recompute fix above: pruneNode deletes stale leaves
+// from a node's `children` map without decrementing `uniqueChildrenSeen`, since
+// that counter is documented as the total number of unique children ever seen, not
+// the current count. If mergeChildren recomputed uniqueChildrenSeen purely from the
+// currently-visible children and wildcardedSegments, a node that had lost most of
+// its children to pruning would have its counter collapse back down to whatever is
+// still visible, erasing history and postponing the hard collapse it should already
+// be close to triggering. The merge must never lower uniqueChildrenSeen below what
+// either side already recorded.
+func TestPathTrie_MergeChildren_PreservesHistoricalCardinalityAfterPruning(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100,
+		HardMaxCardinality: 1000,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	}, nil)
+	require.NoError(t, err)
+
+	// existing simulates a node that has seen 20 unique children over its
+	// lifetime, but 19 of them were pruned away by TTL, leaving only "cc" in the
+	// children map. uniqueChildrenSeen still correctly reflects 20.
+	existing := &pathNode{
+		children:           map[string]*pathNode{"cc": {segment: "cc", children: map[string]*pathNode{}}},
+		uniqueChildrenSeen: 20,
+	}
+	// child is an unrelated, soft-collapsed sibling subtree with a single
+	// wildcarded segment that existing has never seen.
+	child := &pathNode{
+		children:           map[string]*pathNode{"*": {segment: "*", isWildcard: true, children: map[string]*pathNode{}}},
+		softCollapsed:      true,
+		wildcardedSegments: map[string]struct{}{"z1": {}},
+		uniqueChildrenSeen: 1,
+	}
+
+	target := &pathNode{children: map[string]*pathNode{"g1": existing}}
+	source := &pathNode{children: map[string]*pathNode{"g1": child}}
+
+	trie.mergeChildren(target, source)
+
+	assert.GreaterOrEqual(t, existing.uniqueChildrenSeen, 20,
+		"merge must never drop uniqueChildrenSeen below its pre-merge historical value, even when pruning has already shrunk the visible children/wildcardedSegments")
+}
