@@ -376,7 +376,17 @@ func (t *PathTrie) mergeChildren(target, source *pathNode) {
 			// Child already exists, recursively merge their children
 			t.mergeChildren(existing, child)
 			// Inherit collapse state
-			if child.softCollapsed {
+			if child.hardCollapsed {
+				existing.hardCollapsed = true
+			}
+			if existing.hardCollapsed {
+				// A hard-collapsed node routes everything through its single
+				// wildcard child and never consults wildcardedSegments again
+				// (mirrors the cleanup in hardCollapseNode). Don't allocate or
+				// retain a dedup map whose insert path will never use it.
+				existing.softCollapsed = true
+				existing.wildcardedSegments = nil
+			} else if child.softCollapsed {
 				existing.softCollapsed = true
 				// existing may not have gone through its own soft-collapse
 				// transition, in which case wildcardedSegments is still nil.
@@ -388,9 +398,6 @@ func (t *PathTrie) mergeChildren(target, source *pathNode) {
 				for seg := range child.wildcardedSegments {
 					existing.wildcardedSegments[seg] = struct{}{}
 				}
-			}
-			if child.hardCollapsed {
-				existing.hardCollapsed = true
 			}
 			// Recompute the union of segments still visible via explicit
 			// children (excluding the wildcard node itself) plus
@@ -426,6 +433,18 @@ func (t *PathTrie) mergeChildren(target, source *pathNode) {
 				merged = child.uniqueChildrenSeen
 			}
 			existing.uniqueChildrenSeen = merged
+			// A merge can push a node's cardinality over its hard threshold
+			// without ever going through insertSegments' own threshold check,
+			// since insertSegments only re-evaluates the specific node that
+			// receives a brand-new segment. Apply the check here too, so a
+			// merged node doesn't sit above its hard limit until some later,
+			// unrelated request happens to touch it.
+			if !existing.hardCollapsed {
+				hardMax := t.getHardMaxCardinality(existing.depth + 1)
+				if existing.uniqueChildrenSeen > hardMax {
+					t.hardCollapseNode(existing)
+				}
+			}
 		} else {
 			// New child, add it
 			target.children[segment] = child
