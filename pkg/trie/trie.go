@@ -392,10 +392,23 @@ func (t *PathTrie) mergeChildren(target, source *pathNode) {
 			if child.hardCollapsed {
 				existing.hardCollapsed = true
 			}
-			// Take max of uniqueChildrenSeen
-			if child.uniqueChildrenSeen > existing.uniqueChildrenSeen {
-				existing.uniqueChildrenSeen = child.uniqueChildrenSeen
+			// Recompute uniqueChildrenSeen as the true cardinality of the union
+			// of segments ever seen: explicit children (excluding the wildcard
+			// node itself) plus segments recorded only in wildcardedSegments.
+			// Taking max(existing, child) undercounts whenever both sides
+			// contribute segments the other side doesn't already account for,
+			// which can leave a node stuck soft-collapsed instead of
+			// progressing to a hard collapse.
+			seen := make(map[string]struct{}, len(existing.children)+len(existing.wildcardedSegments))
+			for seg := range existing.children {
+				if seg != t.cfg.ReplaceWith {
+					seen[seg] = struct{}{}
+				}
 			}
+			for seg := range existing.wildcardedSegments {
+				seen[seg] = struct{}{}
+			}
+			existing.uniqueChildrenSeen = len(seen)
 		} else {
 			// New child, add it
 			target.children[segment] = child

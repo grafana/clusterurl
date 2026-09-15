@@ -1110,3 +1110,68 @@ func TestPathTrie_HardCollapse_MergeInheritsSoftCollapseWithoutNilMap(t *testing
 		assert.Equal(t, "/orders/*/g1/*", result)
 	})
 }
+
+// TestPathTrie_HardCollapse_MergeRecomputesUniqueChildrenSeen reproduces a bug
+// where mergeChildren took max(existing.uniqueChildrenSeen, child.uniqueChildrenSeen)
+// instead of recomputing the true union of segments ever seen (explicit children
+// plus wildcardedSegments). When the target side already had its own unrelated
+// explicit children, max() undercounted the merged cardinality, which could delay
+// or indefinitely postpone the hard collapse that counter exists to trigger.
+func TestPathTrie_HardCollapse_MergeRecomputesUniqueChildrenSeen(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100,
+		HardMaxCardinality: 1000,
+		DepthSoftCardinalities: map[int]int{
+			1: 1, // 2nd unique order id soft-collapses "orders"
+			3: 3, // 4th unique grandchild soft-collapses a "g1" node
+		},
+		DepthHardCardinalities: map[int]int{
+			1: 2, // 3rd unique order id hard-collapses "orders"
+			3: 8, // 9th unique grandchild hard-collapses a "g1" node
+		},
+		ReplaceWith: "*",
+		Separator:   "/",
+		MaxDepth:    20,
+	}, nil)
+	require.NoError(t, err)
+
+	// o1 stays explicit under "orders". Its "g1" child soft-collapses after 4 real
+	// children (x1-x4, softMax=3) and then wildcards 3 more distinct segments
+	// (y1-y3), giving it uniqueChildrenSeen=7 backed by children={x1,x2,x3,*} and
+	// wildcardedSegments={x4,y1,y2,y3}.
+	trie.Insert("orders/o1/g1/x1")
+	trie.Insert("orders/o1/g1/x2")
+	trie.Insert("orders/o1/g1/x3")
+	trie.Insert("orders/o1/g1/x4")
+	trie.Insert("orders/o1/g1/y1")
+	trie.Insert("orders/o1/g1/y2")
+	trie.Insert("orders/o1/g1/y3")
+
+	// o2 is the second unique order id, which soft-collapses "orders" and routes
+	// through its wildcard child. That wildcard child gets its own "g1" child with
+	// two real grandchildren (aa, bb) that are unrelated to o1's g1 subtree.
+	trie.Insert("orders/o2/g1/aa")
+	trie.Insert("orders/o2/g1/bb")
+
+	// o3 is the third unique order id, which hard-collapses "orders". This merges
+	// o1's soft-collapsed "g1" (7 segments seen) into the wildcard's "g1" (2
+	// segments seen). The true union is 9 distinct segments: aa, bb, x1, x2, x3,
+	// x4, y1, y2, y3.
+	trie.Insert("orders/o3/g1")
+
+	ordersNode := trie.root.children["orders"]
+	require.True(t, ordersNode.hardCollapsed)
+	mergedG1 := ordersNode.children["*"].children["g1"]
+	require.NotNil(t, mergedG1)
+	assert.True(t, mergedG1.softCollapsed)
+	assert.False(t, mergedG1.hardCollapsed, "should not have hard-collapsed yet")
+	assert.Equal(t, 9, mergedG1.uniqueChildrenSeen, "merge must recompute the true union, not max() the two counters")
+
+	// A single new distinct segment under the merged node is now enough to push it
+	// over its hard threshold of 8. Under the old max()-based logic, the
+	// undercounted 7 would only reach 8 here, staying soft-collapsed instead of
+	// hard-collapsing.
+	result := trie.Insert("orders/o4/g1/zNew")
+	assert.Equal(t, "/orders/*/g1/*", result)
+	assert.True(t, mergedG1.hardCollapsed, "merged node should hard-collapse once the true cardinality exceeds the hard threshold")
+}
