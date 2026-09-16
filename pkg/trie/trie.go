@@ -373,19 +373,31 @@ func (t *PathTrie) hardCollapseNode(node *pathNode) {
 func (t *PathTrie) mergeChildren(target, source *pathNode) {
 	for segment, child := range source.children {
 		if existing, exists := target.children[segment]; exists {
+			if existing.hardCollapsed {
+				// existing has already been fully collapsed: per the
+				// hard-collapse invariant, its children map must contain
+				// nothing but its own wildcard child, since Insert/Lookup only
+				// ever consult children[ReplaceWith] once hardCollapsed is set.
+				// Merging child in directly here would attach a new explicit,
+				// permanently-unreachable child instead, so fold it into the
+				// wildcard bucket that is actually still reachable.
+				t.mergeChildren(t.getOrCreateWildcardChild(existing), child)
+				continue
+			}
+
 			// Child already exists, recursively merge their children
 			t.mergeChildren(existing, child)
 			// Inherit collapse state
 			if child.hardCollapsed {
-				existing.hardCollapsed = true
-			}
-			if existing.hardCollapsed {
-				// A hard-collapsed node routes everything through its single
-				// wildcard child and never consults wildcardedSegments again
-				// (mirrors the cleanup in hardCollapseNode). Don't allocate or
-				// retain a dedup map whose insert path will never use it.
-				existing.softCollapsed = true
-				existing.wildcardedSegments = nil
+				// child.hardCollapsed implies child.softCollapsed too. Route
+				// existing through a real hard collapse (not just flag copying)
+				// so any children existing already had of its own - including
+				// whatever the recursive merge above just added - get folded
+				// into its wildcard child too. Without this, existing could end
+				// up hardCollapsed=true while still holding extra, non-wildcard
+				// children that Insert/Lookup can no longer reach but
+				// countNodes/countPatterns keep counting.
+				t.hardCollapseNode(existing)
 			} else if child.softCollapsed {
 				existing.softCollapsed = true
 				// existing may not have gone through its own soft-collapse
@@ -399,47 +411,49 @@ func (t *PathTrie) mergeChildren(target, source *pathNode) {
 					existing.wildcardedSegments[seg] = struct{}{}
 				}
 			}
-			// Recompute the union of segments still visible via explicit
-			// children (excluding the wildcard node itself) plus
-			// wildcardedSegments. Taking a plain max(existing, child) of the
-			// two counters undercounts whenever both sides contribute
-			// segments the other side doesn't already account for, which can
-			// leave a node stuck soft-collapsed instead of progressing to a
-			// hard collapse.
-			//
-			// However, pruneNode deletes stale leaves from `children`
-			// without decrementing uniqueChildrenSeen, since that field is
-			// documented as the total ever seen, not the current count. So
-			// the currently-visible union can be smaller than the true
-			// historical cardinality already captured in existing's or
-			// child's counters. Take the max of the recomputed union and
-			// both prior counters so a merge can only raise
-			// uniqueChildrenSeen, never erase history that pruning already
-			// caused to disappear from the visible sets.
-			seen := make(map[string]struct{}, len(existing.children)+len(existing.wildcardedSegments))
-			for seg := range existing.children {
-				if seg != t.cfg.ReplaceWith {
+
+			if !existing.hardCollapsed {
+				// Recompute the union of segments still visible via explicit
+				// children (excluding the wildcard node itself) plus
+				// wildcardedSegments. Taking a plain max(existing, child) of the
+				// two counters undercounts whenever both sides contribute
+				// segments the other side doesn't already account for, which can
+				// leave a node stuck soft-collapsed instead of progressing to a
+				// hard collapse.
+				//
+				// However, pruneNode deletes stale leaves from `children`
+				// without decrementing uniqueChildrenSeen, since that field is
+				// documented as the total ever seen, not the current count. So
+				// the currently-visible union can be smaller than the true
+				// historical cardinality already captured in existing's or
+				// child's counters. Take the max of the recomputed union and
+				// both prior counters so a merge can only raise
+				// uniqueChildrenSeen, never erase history that pruning already
+				// caused to disappear from the visible sets.
+				seen := make(map[string]struct{}, len(existing.children)+len(existing.wildcardedSegments))
+				for seg := range existing.children {
+					if seg != t.cfg.ReplaceWith {
+						seen[seg] = struct{}{}
+					}
+				}
+				for seg := range existing.wildcardedSegments {
 					seen[seg] = struct{}{}
 				}
-			}
-			for seg := range existing.wildcardedSegments {
-				seen[seg] = struct{}{}
-			}
-			merged := len(seen)
-			if existing.uniqueChildrenSeen > merged {
-				merged = existing.uniqueChildrenSeen
-			}
-			if child.uniqueChildrenSeen > merged {
-				merged = child.uniqueChildrenSeen
-			}
-			existing.uniqueChildrenSeen = merged
-			// A merge can push a node's cardinality over its hard threshold
-			// without ever going through insertSegments' own threshold check,
-			// since insertSegments only re-evaluates the specific node that
-			// receives a brand-new segment. Apply the check here too, so a
-			// merged node doesn't sit above its hard limit until some later,
-			// unrelated request happens to touch it.
-			if !existing.hardCollapsed {
+				merged := len(seen)
+				if existing.uniqueChildrenSeen > merged {
+					merged = existing.uniqueChildrenSeen
+				}
+				if child.uniqueChildrenSeen > merged {
+					merged = child.uniqueChildrenSeen
+				}
+				existing.uniqueChildrenSeen = merged
+
+				// A merge can push a node's cardinality over its hard threshold
+				// without ever going through insertSegments' own threshold check,
+				// since insertSegments only re-evaluates the specific node that
+				// receives a brand-new segment. Apply the check here too, so a
+				// merged node doesn't sit above its hard limit until some later,
+				// unrelated request happens to touch it.
 				hardMax := t.getHardMaxCardinality(existing.depth + 1)
 				if existing.uniqueChildrenSeen > hardMax {
 					t.hardCollapseNode(existing)
