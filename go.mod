@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/prometheus/client_golang v1.23.2
+	github.com/prometheus/client_golang v1.24.1
 	github.com/stretchr/testify v1.12.1
 )
 
