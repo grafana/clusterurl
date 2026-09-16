@@ -1062,3 +1062,290 @@ func BenchmarkPathTrie_InsertWithCollapse(b *testing.B) {
 		}
 	}
 }
+
+// TestPathTrie_HardCollapse_MergeInheritsSoftCollapseWithoutNilMap reproduces a
+// production panic ("assignment to entry in nil map") that occurred when
+// hardCollapseNode merged a soft-collapsed child into a same-named sibling that
+// had not gone through its own soft-collapse transition. mergeChildren copied the
+// softCollapsed flag onto the target node but left its wildcardedSegments map nil,
+// so the next Insert into that node panicked when writing to the nil map.
+func TestPathTrie_HardCollapse_MergeInheritsSoftCollapseWithoutNilMap(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 10,
+		HardMaxCardinality: 100,
+		DepthSoftCardinalities: map[int]int{
+			1: 1, // order-id children of "orders": 2nd unique id soft-collapses "orders"
+			2: 2, // children of an order-id node: 3rd unique child soft-collapses it
+			3: 1, // children of those: 2nd unique child soft-collapses them
+		},
+		DepthHardCardinalities: map[int]int{
+			1: 2, // "orders": 3rd unique order id (beyond the explicit one) hard-collapses it
+		},
+		ReplaceWith: "*",
+		Separator:   "/",
+		MaxDepth:    20,
+	}, nil)
+	require.NoError(t, err)
+
+	// o1 stays explicit under "orders" and soft-collapses its own "g1" child by
+	// giving it two grandchildren (soft threshold at depth 3 is 1).
+	assert.Equal(t, "/orders/o1/g1/h1", trie.Insert("orders/o1/g1/h1"))
+	assert.Equal(t, "/orders/o1/g1/*", trie.Insert("orders/o1/g1/h2"))
+
+	// o2 is the second unique order id, which soft-collapses "orders" and routes
+	// through its wildcard child. That wildcard child gets its own, NOT
+	// soft-collapsed, "g1" child.
+	assert.Equal(t, "/orders/*/g1", trie.Insert("orders/o2/g1"))
+
+	// o3 is the third unique order id, which hard-collapses "orders". This merges
+	// o1 (explicit, whose "g1" child is soft-collapsed) into the wildcard child,
+	// where a not-yet-soft-collapsed "g1" node (from o2) already exists.
+	assert.Equal(t, "/orders/*/g1", trie.Insert("orders/o3/g1"))
+
+	// The merged "g1" node under the wildcard is now marked soft-collapsed.
+	// Inserting a brand-new grandchild segment under it must not panic on a nil
+	// wildcardedSegments map.
+	assert.NotPanics(t, func() {
+		result := trie.Insert("orders/o4/g1/hNew")
+		assert.Equal(t, "/orders/*/g1/*", result)
+	})
+}
+
+// TestPathTrie_HardCollapse_MergeRecomputesUniqueChildrenSeen reproduces a bug
+// where mergeChildren took max(existing.uniqueChildrenSeen, child.uniqueChildrenSeen)
+// instead of recomputing the true union of segments ever seen (explicit children
+// plus wildcardedSegments). When the target side already had its own unrelated
+// explicit children, max() undercounted the merged cardinality, which could delay
+// or indefinitely postpone the hard collapse that counter exists to trigger.
+func TestPathTrie_HardCollapse_MergeRecomputesUniqueChildrenSeen(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100,
+		HardMaxCardinality: 1000,
+		DepthSoftCardinalities: map[int]int{
+			1: 1, // 2nd unique order id soft-collapses "orders"
+			3: 3, // 4th unique grandchild soft-collapses a "g1" node
+		},
+		DepthHardCardinalities: map[int]int{
+			1: 2, // 3rd unique order id hard-collapses "orders"
+			3: 8, // 9th unique grandchild hard-collapses a "g1" node
+		},
+		ReplaceWith: "*",
+		Separator:   "/",
+		MaxDepth:    20,
+	}, nil)
+	require.NoError(t, err)
+
+	// o1 stays explicit under "orders". Its "g1" child soft-collapses after 4 real
+	// children (x1-x4, softMax=3) and then wildcards 3 more distinct segments
+	// (y1-y3), giving it uniqueChildrenSeen=7 backed by children={x1,x2,x3,*} and
+	// wildcardedSegments={x4,y1,y2,y3}.
+	trie.Insert("orders/o1/g1/x1")
+	trie.Insert("orders/o1/g1/x2")
+	trie.Insert("orders/o1/g1/x3")
+	trie.Insert("orders/o1/g1/x4")
+	trie.Insert("orders/o1/g1/y1")
+	trie.Insert("orders/o1/g1/y2")
+	trie.Insert("orders/o1/g1/y3")
+
+	// o2 is the second unique order id, which soft-collapses "orders" and routes
+	// through its wildcard child. That wildcard child gets its own "g1" child with
+	// two real grandchildren (aa, bb) that are unrelated to o1's g1 subtree.
+	trie.Insert("orders/o2/g1/aa")
+	trie.Insert("orders/o2/g1/bb")
+
+	// o3 is the third unique order id, which hard-collapses "orders". This merges
+	// o1's soft-collapsed "g1" (7 segments seen) into the wildcard's "g1" (2
+	// segments seen). The true union is 9 distinct segments: aa, bb, x1, x2, x3,
+	// x4, y1, y2, y3.
+	trie.Insert("orders/o3/g1")
+
+	ordersNode := trie.root.children["orders"]
+	require.True(t, ordersNode.hardCollapsed)
+	mergedG1 := ordersNode.children["*"].children["g1"]
+	require.NotNil(t, mergedG1)
+	assert.True(t, mergedG1.softCollapsed)
+	assert.Equal(t, 9, mergedG1.uniqueChildrenSeen, "merge must recompute the true union, not max() the two counters")
+	// The merge itself recomputes uniqueChildrenSeen to 9, which already
+	// exceeds the depth-3 hard threshold of 8. mergeChildren applies the
+	// hard-collapse check immediately after the recompute, so the node must
+	// not be left sitting above its hard limit waiting for some unrelated
+	// future request to notice. Under the old max()-based counter logic, the
+	// undercounted value of 7 would not have exceeded 8 here at all.
+	assert.True(t, mergedG1.hardCollapsed, "merged node must hard-collapse as soon as the merge pushes it over its hard threshold")
+
+	// Post-collapse inserts must keep routing correctly through the single
+	// wildcard child without panicking.
+	result := trie.Insert("orders/o4/g1/zNew")
+	assert.Equal(t, "/orders/*/g1/*", result)
+}
+
+// TestPathTrie_MergeChildren_PreservesHistoricalCardinalityAfterPruning reproduces
+// a follow-up bug in the union-recompute fix above: pruneNode deletes stale leaves
+// from a node's `children` map without decrementing `uniqueChildrenSeen`, since
+// that counter is documented as the total number of unique children ever seen, not
+// the current count. If mergeChildren recomputed uniqueChildrenSeen purely from the
+// currently-visible children and wildcardedSegments, a node that had lost most of
+// its children to pruning would have its counter collapse back down to whatever is
+// still visible, erasing history and postponing the hard collapse it should already
+// be close to triggering. The merge must never lower uniqueChildrenSeen below what
+// either side already recorded.
+func TestPathTrie_MergeChildren_PreservesHistoricalCardinalityAfterPruning(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100,
+		HardMaxCardinality: 1000,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	}, nil)
+	require.NoError(t, err)
+
+	// existing simulates a node that has seen 20 unique children over its
+	// lifetime, but 19 of them were pruned away by TTL, leaving only "cc" in the
+	// children map. uniqueChildrenSeen still correctly reflects 20.
+	existing := &pathNode{
+		children:           map[string]*pathNode{"cc": {segment: "cc", children: map[string]*pathNode{}}},
+		uniqueChildrenSeen: 20,
+	}
+	// child is an unrelated, soft-collapsed sibling subtree with a single
+	// wildcarded segment that existing has never seen.
+	child := &pathNode{
+		children:           map[string]*pathNode{"*": {segment: "*", isWildcard: true, children: map[string]*pathNode{}}},
+		softCollapsed:      true,
+		wildcardedSegments: map[string]struct{}{"z1": {}},
+		uniqueChildrenSeen: 1,
+	}
+
+	target := &pathNode{children: map[string]*pathNode{"g1": existing}}
+	source := &pathNode{children: map[string]*pathNode{"g1": child}}
+
+	trie.mergeChildren(target, source)
+
+	assert.GreaterOrEqual(t, existing.uniqueChildrenSeen, 20,
+		"merge must never drop uniqueChildrenSeen below its pre-merge historical value, even when pruning has already shrunk the visible children/wildcardedSegments")
+}
+
+// TestPathTrie_MergeChildren_ClearsWildcardedSegmentsWhenInheritingHardCollapse
+// reproduces a bug where a node inheriting hardCollapsed=true from a
+// hard-collapsed source kept whatever wildcardedSegments map it already had
+// (or got one allocated) instead of being cleared to nil like hardCollapseNode
+// does for a node it collapses directly. A hard-collapsed node's insert path
+// (case 1 in insertSegments) never consults wildcardedSegments again, so a
+// stale, potentially large dedup map would sit around unused forever.
+func TestPathTrie_MergeChildren_ClearsWildcardedSegmentsWhenInheritingHardCollapse(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100,
+		HardMaxCardinality: 1000,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	}, nil)
+	require.NoError(t, err)
+
+	// existing already soft-collapsed on its own and is carrying a real
+	// wildcardedSegments dedup map.
+	existing := &pathNode{
+		children:           map[string]*pathNode{},
+		softCollapsed:      true,
+		wildcardedSegments: map[string]struct{}{"a": {}, "b": {}, "c": {}},
+		uniqueChildrenSeen: 3,
+	}
+	// child is hard-collapsed: per hardCollapseNode, its wildcardedSegments is
+	// already nil and it routes everything through a single wildcard child.
+	child := &pathNode{
+		children:           map[string]*pathNode{"*": {segment: "*", isWildcard: true, children: map[string]*pathNode{}}},
+		softCollapsed:      true,
+		hardCollapsed:      true,
+		uniqueChildrenSeen: 10,
+	}
+
+	target := &pathNode{children: map[string]*pathNode{"g1": existing}}
+	source := &pathNode{children: map[string]*pathNode{"g1": child}}
+
+	trie.mergeChildren(target, source)
+
+	assert.True(t, existing.hardCollapsed)
+	assert.Nil(t, existing.wildcardedSegments,
+		"a node inheriting hard collapse must not retain a dedup map its insert path (case 1, hardCollapsed) never consults")
+}
+
+// TestPathTrie_MergeChildren_InheritedHardCollapseFoldsExistingChildren
+// reproduces a bug where a node inheriting hardCollapsed=true from a
+// hard-collapsed child only had its flags copied, without folding its own
+// pre-existing (non-wildcard) children into a wildcard child. Insert and
+// Lookup only ever consult children[ReplaceWith] once hardCollapsed is true,
+// so any other children left in the map become permanently unreachable while
+// still being counted by countNodes/countPatterns - a real invariant
+// violation, not just a bookkeeping nuance.
+func TestPathTrie_MergeChildren_InheritedHardCollapseFoldsExistingChildren(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100,
+		HardMaxCardinality: 1000,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	}, nil)
+	require.NoError(t, err)
+
+	// existing has a real, unrelated explicit child of its own.
+	existing := &pathNode{
+		children:           map[string]*pathNode{"aa": {segment: "aa", children: map[string]*pathNode{}}},
+		uniqueChildrenSeen: 1,
+	}
+	// child is already hard-collapsed.
+	child := &pathNode{
+		children:           map[string]*pathNode{"*": {segment: "*", isWildcard: true, children: map[string]*pathNode{}}},
+		softCollapsed:      true,
+		hardCollapsed:      true,
+		uniqueChildrenSeen: 5,
+	}
+
+	target := &pathNode{children: map[string]*pathNode{"g1": existing}}
+	source := &pathNode{children: map[string]*pathNode{"g1": child}}
+
+	trie.mergeChildren(target, source)
+
+	require.True(t, existing.hardCollapsed)
+	assert.Len(t, existing.children, 1,
+		"a hard-collapsed node's children map must contain nothing but its own wildcard child")
+	_, hasWildcard := existing.children["*"]
+	assert.True(t, hasWildcard)
+}
+
+// TestPathTrie_MergeChildren_SkipsAlreadyHardCollapsedTarget reproduces a bug
+// where merging into a node that was already hard-collapsed by an earlier,
+// unrelated merge event injected a brand-new explicit child directly into its
+// children map instead of routing it through the existing wildcard child,
+// violating the same invariant from the other direction.
+func TestPathTrie_MergeChildren_SkipsAlreadyHardCollapsedTarget(t *testing.T) {
+	trie, err := NewPathTrie(&TrieConfig{
+		SoftMaxCardinality: 100,
+		HardMaxCardinality: 1000,
+		ReplaceWith:        "*",
+		Separator:          "/",
+		MaxDepth:           20,
+	}, nil)
+	require.NoError(t, err)
+
+	wc := &pathNode{segment: "*", isWildcard: true, children: map[string]*pathNode{}}
+	// existing was already hard-collapsed by an earlier, unrelated merge.
+	existing := &pathNode{
+		hardCollapsed:      true,
+		softCollapsed:      true,
+		children:           map[string]*pathNode{"*": wc},
+		uniqueChildrenSeen: 50,
+	}
+	// child brings in a brand-new grandchild name existing has never seen.
+	child := &pathNode{
+		children: map[string]*pathNode{"zNew": {segment: "zNew", children: map[string]*pathNode{}}},
+	}
+
+	target := &pathNode{children: map[string]*pathNode{"g1": existing}}
+	source := &pathNode{children: map[string]*pathNode{"g1": child}}
+
+	trie.mergeChildren(target, source)
+
+	assert.Len(t, existing.children, 1,
+		"an already-hard-collapsed node must not pick up new explicit children from a later merge")
+	_, hasZNew := wc.children["zNew"]
+	assert.True(t, hasZNew, "the new segment should be folded into the existing wildcard child instead")
+}
